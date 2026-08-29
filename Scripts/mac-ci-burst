@@ -1,0 +1,273 @@
+#!/bin/zsh
+set -euo pipefail
+
+export PATH="${PATH:-}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+APP_SUPPORT="${MAC_CI_BURST_HOME:-$HOME/Library/Application Support/MacCIBurst}"
+CONFIG_FILE="${MAC_CI_BURST_CONFIG:-$APP_SUPPORT/config.env}"
+STATE_FILE="${MAC_CI_BURST_STATE:-$APP_SUPPORT/desired-state}"
+CAFFEINATE_LABEL="dev.mac-ci-burst.caffeinate"
+CAFFEINATE_PLIST="$HOME/Library/LaunchAgents/$CAFFEINATE_LABEL.plist"
+
+[[ -f "$CONFIG_FILE" ]] || { print -u2 "Missing configuration: $CONFIG_FILE"; exit 78; }
+source "$CONFIG_FILE"
+
+: "${GITHUB_SCOPE_TYPE:?GITHUB_SCOPE_TYPE must be org or repo}"
+: "${GITHUB_OWNER:?GITHUB_OWNER is required}"
+: "${RUNNER_NAME:?RUNNER_NAME is required}"
+: "${BURST_LABEL:?BURST_LABEL is required}"
+: "${RUNNER_DIR:?RUNNER_DIR is required}"
+: "${MIN_FREE_GIB:=100}"
+: "${DISK_VOLUME:=/System/Volumes/Data}"
+: "${MONITORED_REPOSITORIES:=}"
+: "${USE_CAFFEINATE:=1}"
+
+[[ "$GITHUB_SCOPE_TYPE" == org || "$GITHUB_SCOPE_TYPE" == repo ]] || {
+  print -u2 "GITHUB_SCOPE_TYPE must be org or repo"; exit 78;
+}
+if [[ "$GITHUB_SCOPE_TYPE" == repo ]]; then
+  : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required for repo scope}"
+fi
+if [[ -z "$BURST_LABEL" || "$BURST_LABEL" == *[^A-Za-z0-9_.-]* ]]; then
+  print -u2 "BURST_LABEL may contain only letters, numbers, dots, underscores, and hyphens"
+  exit 78
+fi
+
+mkdir -p "$APP_SUPPORT"
+
+require_tools() {
+  local tool
+  for tool in gh jq; do
+    command -v "$tool" >/dev/null || { print -u2 "Required tool is missing: $tool"; exit 69; }
+  done
+}
+
+scope_api() {
+  if [[ "$GITHUB_SCOPE_TYPE" == org ]]; then
+    print -n -- "/orgs/$GITHUB_OWNER"
+  else
+    print -n -- "/repos/$GITHUB_OWNER/$GITHUB_REPOSITORY"
+  fi
+}
+
+settings_url() {
+  if [[ "$GITHUB_SCOPE_TYPE" == org ]]; then
+    print -n -- "https://github.com/organizations/$GITHUB_OWNER/settings/actions/runners"
+  else
+    print -n -- "https://github.com/$GITHUB_OWNER/$GITHUB_REPOSITORY/settings/actions/runners"
+  fi
+}
+
+desired_state() {
+  [[ -f "$STATE_FILE" ]] && tr -d '\r\n' < "$STATE_FILE" || print -n off
+}
+
+set_desired_state() {
+  local value="$1" temporary="$STATE_FILE.tmp.$$"
+  print -r -- "$value" > "$temporary"
+  mv "$temporary" "$STATE_FILE"
+}
+
+runner_json() {
+  gh api --paginate "$(scope_api)/actions/runners" \
+    | jq -cs --arg name "$RUNNER_NAME" '[.[].runners[]] | map(select(.name == $name)) | first // null'
+}
+
+runner_id() { runner_json | jq -r '.id // empty'; }
+
+has_burst_label() {
+  runner_json | jq -e --arg label "$BURST_LABEL" '.labels // [] | any(.name == $label)' >/dev/null
+}
+
+add_burst_label() {
+  local id="$1"
+  has_burst_label && return 0
+  jq -nc --arg label "$BURST_LABEL" '{labels: [$label]}' \
+    | gh api --method POST "$(scope_api)/actions/runners/$id/labels" --input - >/dev/null
+}
+
+remove_burst_label() {
+  local id="$1"
+  has_burst_label || return 0
+  gh api --method DELETE "$(scope_api)/actions/runners/$id/labels/$BURST_LABEL" >/dev/null
+}
+
+service_label() {
+  local value
+  [[ -f "$RUNNER_DIR/.service" ]] || return 0
+  value="$(tr -d '\r\n' < "$RUNNER_DIR/.service")"
+  [[ "$value" == *.plist ]] && value="${value:t:r}"
+  print -n -- "$value"
+}
+
+service_loaded() {
+  local label="$(service_label)"
+  [[ -n "$label" ]] || return 1
+  launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1
+}
+
+start_service() {
+  [[ -x "$RUNNER_DIR/svc.sh" ]] || { print -u2 "Runner service is not installed in $RUNNER_DIR"; exit 78; }
+  service_loaded || (cd "$RUNNER_DIR" && ./svc.sh start >/dev/null)
+}
+
+stop_service() {
+  [[ -x "$RUNNER_DIR/svc.sh" ]] || return 0
+  service_loaded && (cd "$RUNNER_DIR" && ./svc.sh stop >/dev/null) || true
+}
+
+start_awake() {
+  [[ "$USE_CAFFEINATE" == 1 && -f "$CAFFEINATE_PLIST" ]] || return 0
+  launchctl print "gui/$(id -u)/$CAFFEINATE_LABEL" >/dev/null 2>&1 \
+    || launchctl bootstrap "gui/$(id -u)" "$CAFFEINATE_PLIST"
+}
+
+stop_awake() {
+  launchctl print "gui/$(id -u)/$CAFFEINATE_LABEL" >/dev/null 2>&1 \
+    && launchctl bootout "gui/$(id -u)/$CAFFEINATE_LABEL" >/dev/null 2>&1 || true
+}
+
+free_gib() {
+  df -Pk "$DISK_VOLUME" | awk 'NR == 2 { printf "%d", $4 / 1024 / 1024 }'
+}
+
+repositories_to_check() {
+  if [[ "$GITHUB_SCOPE_TYPE" == repo ]]; then
+    print -r -- "$GITHUB_REPOSITORY"
+  elif [[ -n "$MONITORED_REPOSITORIES" ]]; then
+    for repository in ${(s:,:)MONITORED_REPOSITORIES}; do print -r -- "$repository"; done
+  fi
+}
+
+current_job_json() {
+  local busy="$1" repository run_id match
+  [[ "$busy" == true ]] || { print -n null; return; }
+  while IFS= read -r repository; do
+    [[ -n "$repository" ]] || continue
+    while IFS= read -r run_id; do
+      [[ -n "$run_id" ]] || continue
+      match="$(gh api "/repos/$GITHUB_OWNER/$repository/actions/runs/$run_id/jobs?per_page=100" 2>/dev/null \
+        | jq -c --arg runner "$RUNNER_NAME" --arg repo "$repository" \
+          '.jobs[] | select(.runner_name == $runner and .status == "in_progress") | {repo: $repo, name: .name, url: .html_url}' \
+        | head -n 1 || true)"
+      [[ -n "$match" ]] && { print -n -- "$match"; return; }
+    done < <(gh api "/repos/$GITHUB_OWNER/$repository/actions/runs?status=in_progress&per_page=20" --jq '.workflow_runs[].id' 2>/dev/null || true)
+  done < <(repositories_to_check)
+  print -n null
+}
+
+status_json() {
+  local json id registered=false online=false busy=false schedulable=false service=false desired free state job
+  json="$(runner_json)"
+  id="$(jq -r '.id // empty' <<<"$json")"
+  desired="$(desired_state)"
+  free="$(free_gib)"
+
+  if [[ -n "$id" ]]; then
+    registered=true
+    [[ "$(jq -r '.status' <<<"$json")" == online ]] && online=true
+    [[ "$(jq -r '.busy' <<<"$json")" == true ]] && busy=true
+    jq -e --arg label "$BURST_LABEL" '.labels | any(.name == $label)' <<<"$json" >/dev/null && schedulable=true
+  fi
+  service_loaded && service=true
+
+  if [[ "$registered" == false ]]; then state=setup-required
+  elif [[ "$desired" == drain ]]; then state=draining
+  elif [[ "$busy" == true ]]; then state=busy
+  elif [[ "$desired" == off ]]; then state=off
+  elif (( free < MIN_FREE_GIB )); then state=disk-blocked
+  elif [[ "$schedulable" == true && "$online" == true ]]; then state=available
+  elif [[ "$desired" == available ]]; then state=starting
+  else state=off
+  fi
+
+  job="$(current_job_json "$busy")"
+  jq -nc \
+    --arg state "$state" --arg desired "$desired" --arg runnerName "$RUNNER_NAME" \
+    --arg settingsURL "$(settings_url)" --argjson runnerId "${id:-null}" \
+    --argjson registered "$registered" --argjson online "$online" --argjson busy "$busy" \
+    --argjson schedulable "$schedulable" --argjson serviceLoaded "$service" \
+    --argjson freeGiB "$free" --argjson minimumFreeGiB "$MIN_FREE_GIB" --argjson currentJob "$job" \
+    '{state:$state,desired:$desired,runnerName:$runnerName,runnerId:$runnerId,settingsURL:$settingsURL,
+      registered:$registered,online:$online,busy:$busy,schedulable:$schedulable,
+      serviceLoaded:$serviceLoaded,freeGiB:$freeGiB,minimumFreeGiB:$minimumFreeGiB,currentJob:$currentJob}'
+}
+
+make_available() {
+  local json id free busy
+  json="$(runner_json)"
+  id="$(jq -r '.id // empty' <<<"$json")"
+  busy="$(jq -r '.busy // false' <<<"$json")"
+  [[ -n "$id" ]] || { print -u2 "Runner is not registered yet"; exit 78; }
+  [[ "$busy" != true ]] || { print -u2 "Runner is already busy; wait or keep draining"; exit 75; }
+  free="$(free_gib)"
+  (( free >= MIN_FREE_GIB )) || { print -u2 "Only ${free} GiB is free; ${MIN_FREE_GIB} GiB is required"; exit 75; }
+  set_desired_state available
+  add_burst_label "$id"
+  start_awake
+  start_service
+}
+
+begin_drain() {
+  local id="$(runner_id)"
+  [[ -n "$id" ]] || { set_desired_state off; return; }
+  remove_burst_label "$id"
+  set_desired_state drain
+  reconcile
+}
+
+turn_off() {
+  local json id busy
+  json="$(runner_json)"
+  id="$(jq -r '.id // empty' <<<"$json")"
+  busy="$(jq -r '.busy // false' <<<"$json")"
+  [[ "$busy" != true ]] || { print -u2 "Runner is busy. Use drain so the active job is not interrupted."; exit 75; }
+  [[ -n "$id" ]] && remove_burst_label "$id"
+  stop_service
+  stop_awake
+  set_desired_state off
+}
+
+reconcile() {
+  local desired json busy id free
+  desired="$(desired_state)"
+  json="$(runner_json)"
+  busy="$(jq -r '.busy // false' <<<"$json")"
+  id="$(jq -r '.id // empty' <<<"$json")"
+  free="$(free_gib)"
+
+  case "$desired" in
+    drain)
+      [[ -n "$id" ]] && remove_burst_label "$id"
+      if [[ "$busy" != true ]]; then stop_service; stop_awake; set_desired_state off; fi
+      ;;
+    available)
+      if (( free < MIN_FREE_GIB )); then
+        [[ -n "$id" ]] && remove_burst_label "$id"
+        if [[ "$busy" == true ]]; then set_desired_state drain
+        else stop_service; stop_awake; set_desired_state off
+        fi
+      fi
+      ;;
+    off)
+      if [[ "$busy" != true ]]; then
+        [[ -n "$id" ]] && remove_burst_label "$id"
+        stop_service; stop_awake
+      fi
+      ;;
+    *) print -u2 "Invalid desired state: $desired"; exit 65 ;;
+  esac
+}
+
+usage() { print -u2 "usage: mac-ci-burst {status|tick|available|drain|off|reconcile}"; exit 64; }
+
+require_tools
+case "${1:-}" in
+  status) status_json ;;
+  tick) reconcile; status_json ;;
+  available) make_available ;;
+  drain) begin_drain ;;
+  off) turn_off ;;
+  reconcile) reconcile ;;
+  *) usage ;;
+esac

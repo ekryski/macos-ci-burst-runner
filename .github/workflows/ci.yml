@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell syntax
+        run: zsh -n Scripts/mac-ci-burst Scripts/*.sh Tests/*.sh
+      - name: Build menu controller
+        run: swift build -c release
+      - name: Test state transitions
+        run: ./Tests/test-controller.sh

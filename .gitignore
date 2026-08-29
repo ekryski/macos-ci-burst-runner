@@ -1,0 +1,7 @@
+.DS_Store
+.build/
+.swiftpm/
+config.env
+desired-state
+actions-runner*/
+*.log
