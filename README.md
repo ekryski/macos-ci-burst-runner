@@ -16,6 +16,65 @@ The controller has four operator states:
 It also enforces a configurable free-disk floor before availability and again in
 a GitHub Actions job-start hook.
 
+## How it works
+
+The controller never touches the job queue. It owns three switches on the Mac —
+the runner's capability labels on GitHub, the runner service, and a sleep
+assertion — and GitHub's own label matching does the scheduling.
+
+```mermaid
+flowchart TB
+    you(["You"])
+
+    subgraph gh["GitHub"]
+        direction LR
+        sched["Actions scheduler"]
+        labels["Runner labels"]
+    end
+
+    subgraph mac["Your Mac"]
+        direction TB
+        menu["Menu bar app"]
+        ctl["mac-ci-burst<br/>controller"]
+        cfg[("config.env<br/>desired-state")]
+        caf["caffeinate"]
+        svc["Actions runner service"]
+        guard["pre-job-disk-guard.sh"]
+    end
+
+    you -->|"Available / Drain / Off"| menu
+    menu -->|"tick, every 15s"| ctl
+    cfg -.->|"policy + desired state"| ctl
+
+    ctl -->|"start / stop"| svc
+    ctl -->|"hold awake"| caf
+    ctl <-->|"add / withdraw capability labels,<br/>read online + busy"| labels
+
+    sched -.->|"matches runs-on"| labels
+    sched ==>|"leases a job only when every<br/>required label is present"| svc
+    svc -->|"before any workflow step"| guard
+    guard -->|"exit 75 denies admission"| svc
+```
+
+Going Available adds every capability label while the runner is still offline,
+then starts the service, so the machine becomes eligible at that moment and not
+before. Drain removes the labels first and only then waits, so an in-flight job
+finishes while nothing new can be leased. Off refuses outright while GitHub
+reports the runner busy.
+
+The menu app polls `mac-ci-burst tick` every 15 seconds. That reconciles the real
+state toward the desired one: re-applying the label set after a configuration
+change, clearing labels nothing manages, and dropping out of Available if free
+disk falls under the floor.
+
+A leased job then passes the job-started hook before any workflow step runs. That
+is the second gate, and an independent one — it reclaims space where it can and
+denies admission with exit 75 if the floor is still breached.
+
+This is defense in depth against *your own* scheduling, not a sandbox. Once a job
+is leased it runs with the permissions of the macOS account, as the
+[Safety model](#safety-model) explains.
+
 ## Capability labels
 
 You declare what a Mac *is* — architecture, chip, model, OS, memory — as
