@@ -212,6 +212,19 @@ print off > "$app_support/desired-state"
   print -u2 "Off did not reduce to the static set: $("$ctl" status | /usr/bin/jq -c '.advertisedLabels')"; exit 1
 }
 
+# Reconcile converges the advertised set on the configuration. A capability
+# renamed while the machine is up must not wait for the next `available`.
+print -r -- '{"runners":[{"id":42,"name":"Test-Mac","os":"macOS","status":"online","busy":false,"labels":[{"name":"self-hosted"},{"name":"macOS"},{"name":"ARM64"},{"name":"air"}]}]}' > "$MOCK_STATE"
+print available > "$app_support/desired-state"
+MOCK_FREE_KIB=209715200 "$ctl" reconcile
+[[ "$("$ctl" status | /usr/bin/jq -c '.advertisedLabels')" == '["self-hosted","macOS","ARM64","m2","ram-8gb"]' ]] || {
+  print -u2 "reconcile did not converge: $("$ctl" status | /usr/bin/jq -c '.advertisedLabels')"; exit 1
+}
+[[ "$("$ctl" status | /usr/bin/jq -c '.unmanagedLabels')" == '[]' ]] || {
+  print -u2 "stray survived reconcile: $("$ctl" status | /usr/bin/jq -c '.unmanagedLabels')"; exit 1
+}
+print off > "$app_support/desired-state"
+
 # Detection describes the machine the tests run on: arch, OS, and memory are
 # always derivable; chip and model are Apple-silicon specific.
 detected="$("$ctl" capabilities)"

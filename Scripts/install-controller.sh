@@ -57,6 +57,28 @@ for _ in {1..50}; do
 done
 launchctl bootstrap "gui/$(id -u)" "$menu_plist"
 
+# Application Support is on nobody's PATH, so the documented `mac-ci-burst`
+# invocation fails without a link the user can actually reach.
+link_dir=""
+for candidate in "$HOME/.local/bin" "$HOME/bin"; do
+  case ":$PATH:" in
+    *":$candidate:"*) true ;;
+    *) continue ;;
+  esac
+  [[ -d "$candidate" && -w "$candidate" ]] || continue
+  link_dir="$candidate"
+  break
+done
+if [[ -z "$link_dir" ]]; then
+  print "Add the controller to your PATH:"
+  print "  export PATH=\"\$PATH:$bin_dir\""
+elif [[ -e "$link_dir/mac-ci-burst" && ! -L "$link_dir/mac-ci-burst" ]]; then
+  print "Left the existing file $link_dir/mac-ci-burst alone; invoke the controller by full path."
+else
+  ln -sfn "$bin_dir/mac-ci-burst" "$link_dir/mac-ci-burst"
+  print "Linked mac-ci-burst into $link_dir"
+fi
+
 print "Controller installed. Review config.env, then run:"
 print "  $bin_dir/setup-runner.sh"
 print "Registration leaves the runner Off and unschedulable."

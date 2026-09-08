@@ -166,9 +166,17 @@ has_burst_labels() {
     <<<"$json" >/dev/null
 }
 
+# Advertised, but in neither the capability set nor the static remainder: a
+# renamed capability, or a label added by hand in the GitHub UI.
+unmanaged_labels() {
+  local json="${1:-$(runner_json)}"
+  (( ${#static_label_list} )) || return 0
+  jq -r --argjson known "$(jq -nc --arg csv "$BURST_LABELS,$RUNNER_LABELS" '$csv | split(",")')" \
+    '[.labels // [] | .[].name] | .[] | select(. as $l | $known | index($l) == null)' <<<"$json"
+}
+
 add_burst_labels() {
   local id="$1"
-  has_burst_labels && return 0
   jq -nc --argjson labels "$(burst_labels_json)" '{labels: $labels}' \
     | gh api --method POST "$(scope_api)/actions/runners/$id/labels" --input - >/dev/null
 }
@@ -189,7 +197,7 @@ withdrawable_labels() {
   fi
 }
 
-remove_burst_labels() {
+withdraw_labels() {
   local id="$1" label
   while IFS= read -r label; do
     [[ -n "$label" ]] || continue
@@ -198,6 +206,21 @@ remove_burst_labels() {
     gh api --method DELETE "$(scope_api)/actions/runners/$id/labels/$label" >/dev/null \
       || print -u2 "WARNING: could not remove label '$label'; runner may still be schedulable"
   done < <(withdrawable_labels)
+}
+
+# The Available counterpart of withdraw_labels: make the advertised set match the
+# configuration. Without this, a capability added or renamed while the machine is
+# up stays wrong until someone re-runs `available`, and the runner advertises a
+# set nobody chose.
+converge_labels() {
+  local id="$1" json="${2:-}" label
+  [[ -n "$json" ]] || json="$(runner_json)"
+  while IFS= read -r label; do
+    [[ -n "$label" ]] || continue
+    gh api --method DELETE "$(scope_api)/actions/runners/$id/labels/$label" >/dev/null \
+      || print -u2 "WARNING: could not remove unmanaged label '$label'"
+  done < <(unmanaged_labels "$json")
+  has_burst_labels "$json" || add_burst_labels "$id"
 }
 
 service_label() {
@@ -333,11 +356,8 @@ status_json() {
   fi
 
   # Anything advertised that is neither a capability nor part of the static set.
-  local unmanaged='[]'
-  if (( ${#static_label_list} )); then
-    unmanaged="$(jq -c --argjson known "$(jq -nc --arg csv "$BURST_LABELS,$RUNNER_LABELS" '$csv | split(",")')" \
-      '[.labels // [] | .[].name] | map(select(. as $l | $known | index($l) == null))' <<<"${json:-null}")"
-  fi
+  local unmanaged
+  unmanaged="$(unmanaged_labels "${json:-null}" | jq -Rc 'select(length > 0)' | jq -sc .)"
 
   job="$(current_job_json "$busy")"
   jq -nc \
@@ -373,7 +393,7 @@ make_available() {
   fi
   (( free >= MIN_FREE_GIB )) || { print -u2 "Only ${free} GiB is free; ${MIN_FREE_GIB} GiB is required"; exit 75; }
   set_desired_state available
-  add_burst_labels "$id"
+  converge_labels "$id" "$json"
   start_awake
   start_service
 }
@@ -381,7 +401,7 @@ make_available() {
 begin_drain() {
   local id="$(runner_id)"
   [[ -n "$id" ]] || { set_desired_state off; return; }
-  remove_burst_labels "$id"
+  withdraw_labels "$id"
   set_desired_state drain
   reconcile
 }
@@ -392,7 +412,7 @@ turn_off() {
   id="$(jq -r '.id // empty' <<<"$json")"
   busy="$(jq -r '.busy // false' <<<"$json")"
   [[ "$busy" != true ]] || { print -u2 "Runner is busy. Use drain so the active job is not interrupted."; exit 75; }
-  [[ -n "$id" ]] && remove_burst_labels "$id"
+  [[ -n "$id" ]] && withdraw_labels "$id"
   stop_service
   stop_awake
   set_desired_state off
@@ -408,25 +428,30 @@ reconcile() {
 
   case "$desired" in
     drain)
-      [[ -n "$id" ]] && remove_burst_labels "$id"
+      [[ -n "$id" ]] && withdraw_labels "$id"
       if [[ "$busy" != true ]]; then stop_service; stop_awake; set_desired_state off; fi
       ;;
     available)
       if (( free < MIN_FREE_GIB )); then
-        [[ -n "$id" ]] && remove_burst_labels "$id"
+        [[ -n "$id" ]] && withdraw_labels "$id"
         if [[ "$busy" == true ]]; then set_desired_state drain
         else stop_service; stop_awake; set_desired_state off
         fi
-      elif [[ "$busy" != true ]] && (( free < SOFT_FREE_GIB )) && sweep_due; then
-        # Idle and heading toward the floor: reclaim now so a future job is not
-        # denied at admission time. Never denies, never touches eligibility.
-        run_disk_guard sweep || true
-        : > "$SWEEP_STAMP"
+      else
+        # Above the floor the advertised set should match the configuration, so
+        # a config edit converges on its own instead of waiting for `available`.
+        [[ -n "$id" ]] && converge_labels "$id" "$json"
+        if [[ "$busy" != true ]] && (( free < SOFT_FREE_GIB )) && sweep_due; then
+          # Idle and heading toward the floor: reclaim now so a future job is not
+          # denied at admission time. Never denies, never touches eligibility.
+          run_disk_guard sweep || true
+          : > "$SWEEP_STAMP"
+        fi
       fi
       ;;
     off)
       if [[ "$busy" != true ]]; then
-        [[ -n "$id" ]] && remove_burst_labels "$id"
+        [[ -n "$id" ]] && withdraw_labels "$id"
         stop_service; stop_awake
       fi
       ;;

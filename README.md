@@ -231,7 +231,9 @@ mac-ci-burst reconcile    # enforce desired state, disk floor, and idle sweeps
 
 The installed command lives in
 `~/Library/Application Support/MacCIBurst/bin/mac-ci-burst` unless
-`MAC_CI_BURST_HOME` is overridden.
+`MAC_CI_BURST_HOME` is overridden. `install-controller.sh` links it into
+`~/.local/bin` or `~/bin` when one of those is on your `PATH`, and otherwise
+prints the `export PATH` line to add.
 
 ## Safety model
 
