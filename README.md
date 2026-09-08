@@ -91,8 +91,8 @@ That reports architecture (`ARM64`/`X64`), Apple silicon generation (`M2`,
 what the machine should actually advertise:
 
 ```sh
-BURST_LABELS=ARM64,M2,macbook_air,macos-26,ram-8gb
-RUNNER_LABELS=self-hosted,macOS,ARM64,M2,macbook_air,macos-26,ram-8gb
+BURST_LABELS=M2,macbook_air,macos-26,ram-8gb
+RUNNER_LABELS=self-hosted,macOS,ARM64
 ```
 
 Structured labels let a workflow say what it needs rather than which box it wants
