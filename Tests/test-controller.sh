@@ -32,8 +32,13 @@ case "$path" in
   /orgs/test-owner/actions/runners|/repos/test-owner/test-repo/actions/runners) /bin/cat "$MOCK_STATE" ;;
   /orgs/test-owner/actions/runners/42/labels|/repos/test-owner/test-repo/actions/runners/42/labels)
     [[ "$method" == POST ]]
-    label="$(/bin/cat | /usr/bin/jq -r '.labels[0]')"
-    /usr/bin/jq --arg label "$label" '.runners[0].labels += [{name:$label}]' "$MOCK_STATE" > "$MOCK_STATE.tmp"
+    labels="$(/bin/cat | /usr/bin/jq -c '[.labels[]]')"
+    /usr/bin/jq --argjson labels "$labels" '
+      .runners[0].labels as $have
+      | .runners[0].labels += ($labels
+          | map(select(. as $n | ($have | any(.name == $n)) | not))
+          | map({name: .}))
+    ' "$MOCK_STATE" > "$MOCK_STATE.tmp"
     /bin/mv "$MOCK_STATE.tmp" "$MOCK_STATE"
     /bin/cat "$MOCK_STATE"
     ;;
@@ -145,6 +150,76 @@ CONFIG
 [[ "$("$ctl" status | /usr/bin/jq -r '.settingsURL')" == "https://github.com/test-owner/test-repo/settings/actions/runners" ]]
 
 print 'controller transition, disk-gate, and scope tests passed'
+
+# ---------------------------------------------------------------------------
+# Capability label sets: every configured label is advertised together and
+# cleared together, and a partial set never counts as schedulable.
+# ---------------------------------------------------------------------------
+
+print -r -- '{"runners":[{"id":42,"name":"Test-Mac","os":"macOS","status":"offline","busy":false,"labels":[{"name":"self-hosted"},{"name":"macOS"}]}]}' > "$MOCK_STATE"
+/bin/rm -f "$MOCK_SERVICE" "$MOCK_CAFFEINATE"
+cat > "$app_support/config.env" <<CONFIG
+GITHUB_SCOPE_TYPE=org
+GITHUB_OWNER=test-owner
+RUNNER_NAME=Test-Mac
+BURST_LABELS=ARM64,m2,ram-8
+RUNNER_DIR="$test_root/runner"
+MIN_FREE_GIB=100
+CONFIG
+print off > "$app_support/desired-state"
+export MOCK_FREE_KIB=209715200
+
+[[ "$("$ctl" status | /usr/bin/jq -c '.burstLabels')" == '["ARM64","m2","ram-8"]' ]]
+[[ "$("$ctl" status | /usr/bin/jq -r '.schedulable')" == false ]]
+
+"$ctl" available
+for want in ARM64 m2 ram-8; do
+  /usr/bin/jq -e --arg l "$want" '.runners[0].labels | any(.name == $l)' "$MOCK_STATE" >/dev/null \
+    || { print -u2 "capability label $want was not advertised"; exit 1 }
+done
+[[ "$("$ctl" status | /usr/bin/jq -r '.schedulable')" == true ]]
+
+# One missing capability must not read as fully advertised.
+/usr/bin/jq '.runners[0].labels |= map(select(.name != "m2"))' "$MOCK_STATE" > "$MOCK_STATE.tmp"
+/bin/mv "$MOCK_STATE.tmp" "$MOCK_STATE"
+[[ "$("$ctl" status | /usr/bin/jq -r '.schedulable')" == false ]]
+
+# Off clears every capability label, leaving only the always-present identity set.
+"$ctl" off
+[[ "$("$ctl" status | /usr/bin/jq -c '.advertisedLabels')" == '["self-hosted","macOS"]' ]]
+[[ "$(<"$app_support/desired-state")" == off ]]
+
+# A capability that was renamed leaves its old label behind. It is no longer
+# managed, so a BURST_LABELS-only removal would advertise it forever; Off must
+# reduce the runner to its static set instead.
+print -r -- '{"runners":[{"id":42,"name":"Test-Mac","os":"macOS","status":"offline","busy":false,"labels":[{"name":"self-hosted"},{"name":"macOS"},{"name":"ARM64"},{"name":"air"}]}]}' > "$MOCK_STATE"
+cat > "$app_support/config.env" <<CONFIG
+GITHUB_SCOPE_TYPE=org
+GITHUB_OWNER=test-owner
+RUNNER_NAME=Test-Mac
+BURST_LABELS=ARM64,m2,ram-8gb
+RUNNER_LABELS=self-hosted,macOS,ARM64,m2,ram-8gb
+RUNNER_DIR="$test_root/runner"
+MIN_FREE_GIB=100
+CONFIG
+print off > "$app_support/desired-state"
+
+[[ "$("$ctl" status | /usr/bin/jq -c '.unmanagedLabels')" == '["air"]' ]] || {
+  print -u2 "stray label not reported: $("$ctl" status | /usr/bin/jq -c '.unmanagedLabels')"; exit 1
+}
+"$ctl" off
+[[ "$("$ctl" status | /usr/bin/jq -c '.advertisedLabels')" == '["self-hosted","macOS"]' ]] || {
+  print -u2 "Off did not reduce to the static set: $("$ctl" status | /usr/bin/jq -c '.advertisedLabels')"; exit 1
+}
+
+# Detection describes the machine the tests run on: arch, OS, and memory are
+# always derivable; chip and model are Apple-silicon specific.
+detected="$("$ctl" capabilities)"
+[[ "$detected" == (ARM64|X64)* ]] || { print -u2 "detection arch wrong: $detected"; exit 1 }
+[[ "$detected" == *macos-<->* ]] || { print -u2 "detection OS wrong: $detected"; exit 1 }
+[[ "$detected" == *ram-<->gb* ]] || { print -u2 "detection RAM wrong: $detected"; exit 1 }
+
+print 'capability label set and detection tests passed'
 
 # ---------------------------------------------------------------------------
 # Tiered disk guard

@@ -6,8 +6,8 @@ organization-scoped or repository-scoped runners.
 
 The controller has four operator states:
 
-- **Off:** the runner service is stopped and its unique scheduling label is absent.
-- **Available:** the scheduling label is present, the service is online, and the
+- **Off:** the runner service is stopped and the Mac's capability labels are absent.
+- **Available:** the capability labels are present, the service is online, and the
   Mac is held awake while connected to power.
 - **Busy:** GitHub reports an active job. Turning Off is refused.
 - **Draining:** eligibility is removed immediately; the current job may finish,
@@ -15,6 +15,60 @@ The controller has four operator states:
 
 It also enforces a configurable free-disk floor before availability and again in
 a GitHub Actions job-start hook.
+
+## Capability labels
+
+You declare what a Mac *is* — architecture, chip, model, OS, memory — as
+`BURST_LABELS`. Ask the machine rather than typing it from memory:
+
+```bash
+mac-ci-burst capabilities
+# ARM64,M2,macbook_air,macos-26,ram-8gb
+```
+
+That reports architecture (`ARM64`/`X64`), Apple silicon generation (`M2`,
+`M4-Pro`, …), model (`macbook_air`, `macbook_pro`, `mini`, `studio`, …), major OS
+(`macos-26`), and memory (`ram-8gb`). It only prints a suggestion; you decide
+what the machine should actually advertise:
+
+```sh
+BURST_LABELS=ARM64,M2,macbook_air,macos-26,ram-8gb
+RUNNER_LABELS=self-hosted,macOS,ARM64,M2,macbook_air,macos-26,ram-8gb
+```
+
+Structured labels let a workflow say what it needs rather than which box it wants
+— `macos-26` for an OS bump, `M2` for a chipset check, `ram-8gb` to keep a
+memory-hungry build off a small machine.
+
+That set is also the scheduling switch. Going Available adds every entry; Drain
+and Off remove every entry. Workflows select on capability, not on machine
+identity, so a job lands on whichever opt-in Mac is currently Available and meets
+its requirements:
+
+```yaml
+jobs:
+  build:
+    runs-on: [self-hosted, macOS, ARM64, M2, macos-26]
+```
+
+GitHub does not negotiate capabilities dynamically — label matching *is* the
+mechanism. What makes this safe is that the labels a job selects on are exactly
+the labels the controller withdraws when you stop lending the machine.
+
+The corollary is the one rule you must check yourself: whatever `RUNNER_LABELS`
+still holds once `BURST_LABELS` is stripped (normally just `self-hosted` and
+`macOS`) is what the Mac keeps matching while Off. No workflow may be satisfiable
+by that remainder alone. `setup-runner.sh` prints both sets at registration so
+you can confirm it.
+
+Drain and Off do not remove only the configured capabilities — they reduce the
+runner to exactly that static remainder. Renaming a capability, or adding a label
+by hand in the GitHub UI, would otherwise leave a label nothing manages, and an
+unmanaged label keeps the Mac matchable no matter how often you drain. Anything
+advertised that is in neither set is reported as `unmanagedLabels` in
+`mac-ci-burst status` and flagged in the menu until the next Drain or Off clears
+it. If a label cannot be deleted, the controller says so on stderr rather than
+reporting a clean drain.
 
 ## Tiered disk guard
 
@@ -68,8 +122,8 @@ workflows that can be modified by untrusted contributors.
 
 For organization runners, create a runner group restricted to selected private
 repositories and, where available, selected trusted workflows. Every eligible
-workflow must require the configured `BURST_LABEL`; otherwise removing that label
-cannot drain the machine safely.
+workflow must require at least one label from the configured `BURST_LABELS`;
+otherwise removing those labels cannot drain the machine safely.
 
 The project stores no GitHub credential. It uses an existing `gh` login backed by
 the macOS keychain. Never put tokens in `config.env`.
@@ -111,7 +165,7 @@ and fine-grained alternatives in its
    open -e "$HOME/Library/Application Support/MacCIBurst/config.env"
    ```
 
-   Set the scope, owner, runner name, unique burst label, runner directory, disk
+   Set the scope, owner, runner name, capability labels, runner directory, disk
    threshold, and optional runner group. No repository names are required for an
    organization runner unless you want current-job links in the menu.
 
@@ -120,12 +174,13 @@ and fine-grained alternatives in its
    because public forks can otherwise submit dangerous workflow code. See
    [Managing access with runner groups](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/manage-access).
 
-5. Audit every intended workflow. It must require the exact burst label:
+5. Audit every intended workflow. Each must require at least one capability label
+   from `BURST_LABELS`, and none may be satisfiable without one:
 
    ```yaml
    jobs:
      test-on-mac:
-       runs-on: [self-hosted, macOS, burst]
+       runs-on: [self-hosted, macOS, ARM64, m2]
        steps:
          - uses: actions/checkout@v4
          - run: ./your-safe-test-command
@@ -137,7 +192,7 @@ and fine-grained alternatives in its
    ```yaml
    runs-on:
      group: your-restricted-runner-group
-     labels: burst
+     labels: [ARM64, m2]
    ```
 
 6. Register the runner:
@@ -148,7 +203,8 @@ and fine-grained alternatives in its
 
    The official runner archive is selected for the current Mac architecture and
    installed only after SHA-256 verification. Registration finishes **Off** with
-   the scheduling label removed.
+   every capability label removed, and prints the labels that remain so you can
+   confirm no workflow matches them alone.
 
 7. Verify the safe initial state:
 
@@ -165,6 +221,7 @@ the lid open, or use a supported powered clamshell configuration.
 ## Command-line control
 
 ```bash
+mac-ci-burst capabilities # labels describing this machine's hardware and OS
 mac-ci-burst status       # JSON status for scripts or diagnostics
 mac-ci-burst available    # pass disk gate, add eligibility, start runner
 mac-ci-burst drain        # remove eligibility, finish current job, stop
@@ -178,9 +235,10 @@ The installed command lives in
 
 ## Safety model
 
-The unique burst label is the scheduling switch. Availability adds it while the
-runner is offline, then starts the service. Drain removes it before doing anything
-else, so no new matching job can be leased while an existing job finishes.
+The capability label set is the scheduling switch. Availability adds every label
+while the runner is offline, then starts the service. Drain removes them all
+before doing anything else, so no new matching job can be leased while an existing
+job finishes. A partially applied set never counts as available.
 
 This is defense in depth, not sandboxing. A workflow already leased to the runner
 can execute with the permissions of the macOS runner account. Disk checks do not

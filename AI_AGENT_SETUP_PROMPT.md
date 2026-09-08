@@ -32,9 +32,10 @@ Safety constraints:
 6. Do not guess the GitHub owner, scope, repository access, runner group, runner
    name, scheduling label, runner directory, or disk floor. Ask me for missing
    values as one concise group.
-7. The unique burst label must be required by every eligible workflow. Do not
-   treat `self-hosted`, `macOS`, or an architecture label as the availability
-   switch.
+7. Every eligible workflow must require at least one label from `BURST_LABELS`,
+   and none may be satisfiable by the labels that remain when `BURST_LABELS` is
+   stripped from `RUNNER_LABELS`. Do not treat that always-present remainder —
+   normally `self-hosted` and `macOS` — as the availability switch.
 8. Do not alter repository workflows without showing me the exact proposed diff
    and receiving approval.
 9. Stop without registering anything if the existing runner directory conflicts,
@@ -50,7 +51,8 @@ Procedure:
    - organization or repository scope;
    - GitHub owner and repository only when repository-scoped;
    - a unique runner name;
-   - a unique burst label;
+   - the capability labels this Mac should advertise (`BURST_LABELS`), covering
+     architecture, chip, and memory as the workflows select on them;
    - runner directory;
    - minimum free GiB, and the soft threshold if it should not be twice that;
    - disk guard cache directories, artifact directory and retention count, and
@@ -75,7 +77,7 @@ Procedure:
    - desired state is `off`;
    - the runner is not busy;
    - the service is stopped/offline;
-   - the burst label is absent;
+   - every capability label is absent;
    - the disk floor and soft threshold are correctly reported;
    - no credentials or personal paths were written inside this Git repository.
 9. Report the configuration using redacted/generic descriptions. Do not make the

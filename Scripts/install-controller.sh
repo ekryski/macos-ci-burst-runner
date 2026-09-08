@@ -47,7 +47,14 @@ print -r -- "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 </dict></plist>" > "$awake_plist"
 
 plutil -lint "$menu_plist" "$awake_plist" >/dev/null
+# bootout returns before launchd has finished tearing the job down, and
+# bootstrapping into that window fails with "Input/output error" (5). Wait for
+# the old job to disappear before bootstrapping the new one.
 launchctl bootout "gui/$(id -u)/$menu_label" >/dev/null 2>&1 || true
+for _ in {1..50}; do
+  launchctl print "gui/$(id -u)/$menu_label" >/dev/null 2>&1 || break
+  sleep 0.1
+done
 launchctl bootstrap "gui/$(id -u)" "$menu_plist"
 
 print "Controller installed. Review config.env, then run:"

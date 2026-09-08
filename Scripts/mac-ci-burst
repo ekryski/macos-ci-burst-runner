@@ -3,6 +3,52 @@ set -euo pipefail
 
 export PATH="${PATH:-}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+# Capability labels derived from the hardware, so adding a machine does not mean
+# hand-writing what it is. This only prints a suggestion; nothing is applied.
+detect_capability_labels() {
+  local chip model_name model os_major ram_gb
+  local -a labels
+  case "$(uname -m)" in
+    arm64) labels=(ARM64) ;;
+    x86_64) labels=(X64) ;;
+    *) labels=("$(uname -m)") ;;
+  esac
+
+  chip="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+  if [[ "$chip" == Apple\ * ]]; then
+    chip="${chip#Apple }"
+    labels+=("${chip// /-}")
+  fi
+
+  model_name="$(system_profiler SPHardwareDataType 2>/dev/null | awk -F': ' '/Model Name/ { print $2; exit }' || true)"
+  case "$model_name" in
+    "MacBook Air") model=macbook_air ;;
+    "MacBook Pro") model=macbook_pro ;;
+    "MacBook") model=macbook ;;
+    "Mac mini") model=mini ;;
+    "Mac Studio") model=studio ;;
+    "Mac Pro") model=mac_pro ;;
+    iMac*) model=imac ;;
+    *) model="" ;;
+  esac
+  if [[ -n "$model" ]]; then labels+=("$model"); fi
+
+  os_major="$(sw_vers -productVersion 2>/dev/null | cut -d. -f1 || true)"
+  if [[ -n "$os_major" ]]; then labels+=("macos-$os_major"); fi
+
+  ram_gb=$(( $(sysctl -n hw.memsize 2>/dev/null || print 0) / 1073741824 ))
+  if (( ram_gb > 0 )); then labels+=("ram-${ram_gb}gb"); fi
+
+  print -r -- "${(j:,:)labels}"
+}
+
+# Answered before the configuration is read: this is what you consult while
+# deciding what BURST_LABELS should say for a machine you are adding.
+if [[ "${1:-}" == capabilities ]]; then
+  detect_capability_labels
+  exit 0
+fi
+
 APP_SUPPORT="${MAC_CI_BURST_HOME:-$HOME/Library/Application Support/MacCIBurst}"
 CONFIG_FILE="${MAC_CI_BURST_CONFIG:-$APP_SUPPORT/config.env}"
 STATE_FILE="${MAC_CI_BURST_STATE:-$APP_SUPPORT/desired-state}"
@@ -17,7 +63,12 @@ source "$CONFIG_FILE"
 : "${GITHUB_SCOPE_TYPE:?GITHUB_SCOPE_TYPE must be org or repo}"
 : "${GITHUB_OWNER:?GITHUB_OWNER is required}"
 : "${RUNNER_NAME:?RUNNER_NAME is required}"
-: "${BURST_LABEL:?BURST_LABEL is required}"
+# Capability labels this Mac advertises only while it is Available. BURST_LABELS
+# is the current form; BURST_LABEL stays accepted for single-label configs.
+: "${BURST_LABEL:=}"
+: "${BURST_LABELS:=$BURST_LABEL}"
+BURST_LABELS="${BURST_LABELS// /}"
+[[ -n "$BURST_LABELS" ]] || { print -u2 "BURST_LABELS (or BURST_LABEL) is required"; exit 78; }
 : "${RUNNER_DIR:?RUNNER_DIR is required}"
 : "${MIN_FREE_GIB:=100}"
 : "${SOFT_FREE_GIB:=$(( MIN_FREE_GIB * 2 ))}"
@@ -30,6 +81,7 @@ source "$CONFIG_FILE"
 : "${SWEEP_DAYS:=3}"
 : "${CLEAN_CMD:=}"
 : "${CLEAN_RM:=0}"
+: "${RUNNER_LABELS:=}"
 : "${MONITORED_REPOSITORIES:=}"
 : "${USE_CAFFEINATE:=1}"
 
@@ -39,10 +91,27 @@ source "$CONFIG_FILE"
 if [[ "$GITHUB_SCOPE_TYPE" == repo ]]; then
   : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required for repo scope}"
 fi
-if [[ -z "$BURST_LABEL" || "$BURST_LABEL" == *[^A-Za-z0-9_.-]* ]]; then
-  print -u2 "BURST_LABEL may contain only letters, numbers, dots, underscores, and hyphens"
-  exit 78
-fi
+typeset -ga burst_label_list
+burst_label_list=(${(s:,:)BURST_LABELS})
+for _label in "${burst_label_list[@]}"; do
+  if [[ -z "$_label" || "$_label" == *[^A-Za-z0-9_.-]* ]]; then
+    print -u2 "BURST_LABELS entries may contain only letters, numbers, dots, underscores, and hyphens"
+    exit 78
+  fi
+done
+unset _label
+
+# Labels the runner keeps while Off: everything in RUNNER_LABELS that is not a
+# capability. Anything else on the runner — a renamed capability, a label added
+# by hand in the GitHub UI — is unmanaged and would silently keep the Mac
+# matchable, so withdrawal is defined as "reduce to exactly this set".
+typeset -ga static_label_list
+static_label_list=()
+RUNNER_LABELS="${RUNNER_LABELS// /}"
+for _label in ${(s:,:)RUNNER_LABELS}; do
+  [[ ",$BURST_LABELS," == *",$_label,"* ]] || static_label_list+=("$_label")
+done
+unset _label
 
 mkdir -p "$APP_SUPPORT"
 
@@ -86,21 +155,49 @@ runner_json() {
 
 runner_id() { runner_json | jq -r '.id // empty'; }
 
-has_burst_label() {
-  runner_json | jq -e --arg label "$BURST_LABEL" '.labels // [] | any(.name == $label)' >/dev/null
+burst_labels_json() { jq -nc --arg csv "$BURST_LABELS" '$csv | split(",")'; }
+
+# Schedulable means every configured capability label is present. A partial set
+# still lets a job match, so it must never read as fully advertised.
+has_burst_labels() {
+  local json="${1:-$(runner_json)}"
+  jq -e --argjson want "$(burst_labels_json)" \
+    '[.labels // [] | .[].name] as $have | $want | all(. as $l | $have | index($l) != null)' \
+    <<<"$json" >/dev/null
 }
 
-add_burst_label() {
+add_burst_labels() {
   local id="$1"
-  has_burst_label && return 0
-  jq -nc --arg label "$BURST_LABEL" '{labels: [$label]}' \
+  has_burst_labels && return 0
+  jq -nc --argjson labels "$(burst_labels_json)" '{labels: $labels}' \
     | gh api --method POST "$(scope_api)/actions/runners/$id/labels" --input - >/dev/null
 }
 
-remove_burst_label() {
-  local id="$1"
-  has_burst_label || return 0
-  gh api --method DELETE "$(scope_api)/actions/runners/$id/labels/$BURST_LABEL" >/dev/null
+# Withdrawal reduces the runner to its static set rather than removing only the
+# labels currently configured. That also clears strays, which a BURST_LABELS-only
+# removal would leave advertised forever. Without RUNNER_LABELS in the config
+# there is no static set to reduce to, so fall back to the capability list.
+withdrawable_labels() {
+  local present
+  present="$(runner_json | jq -c '[.labels // [] | .[].name]')"
+  if (( ${#static_label_list} )); then
+    jq -r --argjson keep "$(printf '%s\n' "${static_label_list[@]}" | jq -Rc . | jq -sc .)" \
+      '.[] | select(. as $l | $keep | index($l) == null)' <<<"$present"
+  else
+    jq -r --argjson drop "$(burst_labels_json)" \
+      '.[] | select(. as $l | $drop | index($l) != null)' <<<"$present"
+  fi
+}
+
+remove_burst_labels() {
+  local id="$1" label
+  while IFS= read -r label; do
+    [[ -n "$label" ]] || continue
+    # A label that will not delete (GitHub read-only labels cannot be) leaves the
+    # Mac eligible. That has to be loud rather than swallowed.
+    gh api --method DELETE "$(scope_api)/actions/runners/$id/labels/$label" >/dev/null \
+      || print -u2 "WARNING: could not remove label '$label'; runner may still be schedulable"
+  done < <(withdrawable_labels)
 }
 
 service_label() {
@@ -221,7 +318,7 @@ status_json() {
     registered=true
     [[ "$(jq -r '.status' <<<"$json")" == online ]] && online=true
     [[ "$(jq -r '.busy' <<<"$json")" == true ]] && busy=true
-    jq -e --arg label "$BURST_LABEL" '.labels | any(.name == $label)' <<<"$json" >/dev/null && schedulable=true
+    has_burst_labels "$json" && schedulable=true
   fi
   service_loaded && service=true
 
@@ -235,6 +332,13 @@ status_json() {
   else state=off
   fi
 
+  # Anything advertised that is neither a capability nor part of the static set.
+  local unmanaged='[]'
+  if (( ${#static_label_list} )); then
+    unmanaged="$(jq -c --argjson known "$(jq -nc --arg csv "$BURST_LABELS,$RUNNER_LABELS" '$csv | split(",")')" \
+      '[.labels // [] | .[].name] | map(select(. as $l | $known | index($l) == null))' <<<"${json:-null}")"
+  fi
+
   job="$(current_job_json "$busy")"
   jq -nc \
     --arg state "$state" --arg desired "$desired" --arg runnerName "$RUNNER_NAME" \
@@ -243,10 +347,15 @@ status_json() {
     --argjson schedulable "$schedulable" --argjson serviceLoaded "$service" \
     --argjson freeGiB "$free" --argjson minimumFreeGiB "$MIN_FREE_GIB" \
     --argjson softFreeGiB "$SOFT_FREE_GIB" --argjson currentJob "$job" \
+    --argjson burstLabels "$(burst_labels_json)" \
+    --argjson advertisedLabels "$(jq -c '[.labels // [] | .[].name]' <<<"${json:-null}")" \
+    --argjson unmanagedLabels "$unmanaged" \
     '{state:$state,desired:$desired,runnerName:$runnerName,runnerId:$runnerId,settingsURL:$settingsURL,
       registered:$registered,online:$online,busy:$busy,schedulable:$schedulable,
       serviceLoaded:$serviceLoaded,freeGiB:$freeGiB,minimumFreeGiB:$minimumFreeGiB,
-      softFreeGiB:$softFreeGiB,currentJob:$currentJob}'
+      softFreeGiB:$softFreeGiB,currentJob:$currentJob,
+      burstLabels:$burstLabels,advertisedLabels:$advertisedLabels,
+      unmanagedLabels:$unmanagedLabels}'
 }
 
 make_available() {
@@ -264,7 +373,7 @@ make_available() {
   fi
   (( free >= MIN_FREE_GIB )) || { print -u2 "Only ${free} GiB is free; ${MIN_FREE_GIB} GiB is required"; exit 75; }
   set_desired_state available
-  add_burst_label "$id"
+  add_burst_labels "$id"
   start_awake
   start_service
 }
@@ -272,7 +381,7 @@ make_available() {
 begin_drain() {
   local id="$(runner_id)"
   [[ -n "$id" ]] || { set_desired_state off; return; }
-  remove_burst_label "$id"
+  remove_burst_labels "$id"
   set_desired_state drain
   reconcile
 }
@@ -283,7 +392,7 @@ turn_off() {
   id="$(jq -r '.id // empty' <<<"$json")"
   busy="$(jq -r '.busy // false' <<<"$json")"
   [[ "$busy" != true ]] || { print -u2 "Runner is busy. Use drain so the active job is not interrupted."; exit 75; }
-  [[ -n "$id" ]] && remove_burst_label "$id"
+  [[ -n "$id" ]] && remove_burst_labels "$id"
   stop_service
   stop_awake
   set_desired_state off
@@ -299,12 +408,12 @@ reconcile() {
 
   case "$desired" in
     drain)
-      [[ -n "$id" ]] && remove_burst_label "$id"
+      [[ -n "$id" ]] && remove_burst_labels "$id"
       if [[ "$busy" != true ]]; then stop_service; stop_awake; set_desired_state off; fi
       ;;
     available)
       if (( free < MIN_FREE_GIB )); then
-        [[ -n "$id" ]] && remove_burst_label "$id"
+        [[ -n "$id" ]] && remove_burst_labels "$id"
         if [[ "$busy" == true ]]; then set_desired_state drain
         else stop_service; stop_awake; set_desired_state off
         fi
@@ -317,7 +426,7 @@ reconcile() {
       ;;
     off)
       if [[ "$busy" != true ]]; then
-        [[ -n "$id" ]] && remove_burst_label "$id"
+        [[ -n "$id" ]] && remove_burst_labels "$id"
         stop_service; stop_awake
       fi
       ;;
@@ -325,7 +434,7 @@ reconcile() {
   esac
 }
 
-usage() { print -u2 "usage: mac-ci-burst {status|tick|available|drain|off|reconcile}"; exit 64; }
+usage() { print -u2 "usage: mac-ci-burst {status|tick|available|drain|off|reconcile|capabilities}"; exit 64; }
 
 require_tools
 case "${1:-}" in

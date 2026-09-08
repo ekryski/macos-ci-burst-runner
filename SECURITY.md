@@ -20,9 +20,17 @@ repositories and selected workflows where GitHub supports that policy.
 
 ## Scheduling invariant
 
-Every eligible workflow must require the unique `BURST_LABEL`. Drain removes that
-label before waiting for an active job. If another label can independently match
-the Mac, the scheduling invariant is broken.
+Every eligible workflow must require at least one entry from `BURST_LABELS`.
+Drain removes every one of those labels before waiting for an active job.
+
+The labels that remain on the runner while it is Off — `RUNNER_LABELS` minus
+`BURST_LABELS` — are what the Mac still matches on. If any workflow can be
+satisfied by that remainder alone, the invariant is broken and draining cannot
+make the machine unschedulable. Drain and Off therefore reduce the runner to that
+remainder rather than removing only the configured capabilities, so a renamed or
+hand-added label cannot survive as an unmanaged way to match the machine. Keep the remainder to identity labels such as
+`self-hosted` and `macOS`, and declare every selectable capability
+(architecture, chip, memory) in `BURST_LABELS`.
 
 ## Reporting vulnerabilities
 

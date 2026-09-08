@@ -22,6 +22,10 @@ private struct RunnerStatus: Decodable {
     let minimumFreeGiB: Int
     // Present since the tiered disk guard; older status output omits it.
     let softFreeGiB: Int?
+    // Present since capability label sets; older status output omits both.
+    let burstLabels: [String]?
+    let advertisedLabels: [String]?
+    let unmanagedLabels: [String]?
     let currentJob: CurrentJob?
 }
 
@@ -58,6 +62,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let stateItem = NSMenuItem(title: "Checking…", action: nil, keyEquivalent: "")
     private let detailItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let diskItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let capabilityItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let unmanagedItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private var availableItem: NSMenuItem!
     private var drainItem: NSMenuItem!
     private var offItem: NSMenuItem!
@@ -96,6 +102,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(stateItem)
         menu.addItem(detailItem)
         menu.addItem(diskItem)
+        menu.addItem(capabilityItem)
+        menu.addItem(unmanagedItem)
 
         jobItem = NSMenuItem(title: "Open current job", action: #selector(openCurrentJob), keyEquivalent: "j")
         jobItem.target = self
@@ -150,6 +158,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             detailItem.title = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             detailItem.isHidden = detailItem.title.isEmpty
             diskItem.isHidden = true
+            capabilityItem.isHidden = true
+            unmanagedItem.isHidden = true
             updateActions()
             return
         }
@@ -180,6 +190,25 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         diskItem.title = diskTitle
         diskItem.isHidden = false
+
+        // The capability labels are the scheduling switch: showing whether they
+        // are currently on the runner is how the operator sees eligibility.
+        if let capabilities = status.burstLabels, !capabilities.isEmpty {
+            let joined = capabilities.joined(separator: ", ")
+            capabilityItem.title = "Capabilities: \(joined) · \(status.schedulable ? "advertised" : "withheld")"
+            capabilityItem.isHidden = false
+        } else {
+            capabilityItem.isHidden = true
+        }
+
+        // A label the controller does not manage keeps the Mac matchable after a
+        // drain, so it is worth saying out loud rather than only in the JSON.
+        if let stray = status.unmanagedLabels, !stray.isEmpty {
+            unmanagedItem.title = "⚠︎ Unmanaged labels: \(stray.joined(separator: ", "))"
+            unmanagedItem.isHidden = false
+        } else {
+            unmanagedItem.isHidden = true
+        }
         updateActions()
     }
 

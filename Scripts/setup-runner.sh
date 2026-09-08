@@ -14,7 +14,12 @@ done
 : "${GITHUB_SCOPE_TYPE:?GITHUB_SCOPE_TYPE must be org or repo}"
 : "${GITHUB_OWNER:?GITHUB_OWNER is required}"
 : "${RUNNER_NAME:?RUNNER_NAME is required}"
-: "${BURST_LABEL:?BURST_LABEL is required}"
+# Capability labels the controller adds and removes. BURST_LABEL is the older
+# single-label spelling and still works.
+: "${BURST_LABEL:=}"
+: "${BURST_LABELS:=$BURST_LABEL}"
+BURST_LABELS="${BURST_LABELS// /}"
+[[ -n "$BURST_LABELS" ]] || { print -u2 "BURST_LABELS (or BURST_LABEL) is required"; exit 78; }
 : "${RUNNER_DIR:?RUNNER_DIR is required}"
 : "${MIN_FREE_GIB:=100}"
 : "${SOFT_FREE_GIB:=$(( MIN_FREE_GIB * 2 ))}"
@@ -29,9 +34,24 @@ done
 : "${RUNNER_LABELS:=self-hosted,macOS,burst}"
 : "${DISK_VOLUME:=/System/Volumes/Data}"
 
-[[ ",$RUNNER_LABELS," == *",$BURST_LABEL,"* ]] || {
-  print -u2 "RUNNER_LABELS must include BURST_LABEL ($BURST_LABEL)"; exit 78;
-}
+RUNNER_LABELS="${RUNNER_LABELS// /}"
+typeset -a burst_label_list static_label_list
+burst_label_list=(${(s:,:)BURST_LABELS})
+static_label_list=()
+for label in ${(s:,:)RUNNER_LABELS}; do
+  [[ ",$BURST_LABELS," == *",$label,"* ]] || static_label_list+=("$label")
+done
+for label in "${burst_label_list[@]}"; do
+  [[ ",$RUNNER_LABELS," == *",$label,"* ]] || {
+    print -u2 "RUNNER_LABELS must include every BURST_LABELS entry (missing: $label)"; exit 78;
+  }
+done
+# Whatever is left when the capability labels are stripped is what this Mac still
+# matches on while it is Off. If a workflow can be satisfied by that remainder
+# alone, draining cannot make the machine unschedulable.
+print "Labels always present (Off included): ${(j:, :)static_label_list}"
+print "Capability labels added only while Available: ${(j:, :)burst_label_list}"
+print "Confirm no workflow selects on the always-present set alone."
 if [[ "$GITHUB_SCOPE_TYPE" == org ]]; then
   : "${RUNNER_GROUP:=Default}"
   scope_api="/orgs/$GITHUB_OWNER"
