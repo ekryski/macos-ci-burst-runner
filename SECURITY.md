@@ -23,13 +23,14 @@ repositories and selected workflows where GitHub supports that policy.
 Every eligible workflow must require at least one entry from `BURST_LABELS`.
 Drain removes every one of those labels before waiting for an active job.
 
-The labels that remain on the runner while it is Off — `RUNNER_LABELS` minus
-`BURST_LABELS` — are what the Mac still matches on. If any workflow can be
+The labels that remain on the runner while it is Off — `RUNNER_LABELS`, less any
+`BURST_LABELS` entries it also lists — are what the Mac still matches on. If any workflow can be
 satisfied by that remainder alone, the invariant is broken and draining cannot
 make the machine unschedulable. Drain and Off therefore reduce the runner to that
 remainder rather than removing only the configured capabilities, so a renamed or
-hand-added label cannot survive as an unmanaged way to match the machine. Keep the remainder to identity labels such as
-`self-hosted` and `macOS`, and declare every selectable capability
+hand-added label cannot survive as an unmanaged way to match the machine. Keep the
+remainder to identity labels such as `self-hosted`, `macOS`, and the
+architecture, and declare every selectable capability
 (architecture, chip, memory) in `BURST_LABELS`.
 
 ## Reporting vulnerabilities

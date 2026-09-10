@@ -5,14 +5,20 @@ export PATH="${PATH:-}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:
 
 # Capability labels derived from the hardware, so adding a machine does not mean
 # hand-writing what it is. This only prints a suggestion; nothing is applied.
+# Prints two config lines. RUNNER_LABELS holds what never changes about the Mac
+# and stays on it while Off; BURST_LABELS holds what workflows select on and is
+# withdrawn on Drain. The OS label uses GitHub's hosted image names — macos-26 on
+# Apple silicon, macos-26-intel on Intel — so a workflow can name the same class
+# whether it lands on this Mac or on a GitHub-hosted runner.
 detect_capability_labels() {
-  local chip model_name model os_major ram_gb
+  local arch chip model_name model os_major os_suffix="" ram_gb
   local -a labels
   case "$(uname -m)" in
-    arm64) labels=(ARM64) ;;
-    x86_64) labels=(X64) ;;
-    *) labels=("$(uname -m)") ;;
+    arm64) arch=ARM64 ;;
+    x86_64) arch=X64; os_suffix=-intel ;;
+    *) arch="$(uname -m)" ;;
   esac
+  labels=()
 
   chip="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
   if [[ "$chip" == Apple\ * ]]; then
@@ -34,12 +40,13 @@ detect_capability_labels() {
   if [[ -n "$model" ]]; then labels+=("$model"); fi
 
   os_major="$(sw_vers -productVersion 2>/dev/null | cut -d. -f1 || true)"
-  if [[ -n "$os_major" ]]; then labels+=("macos-$os_major"); fi
+  if [[ -n "$os_major" ]]; then labels+=("macos-$os_major$os_suffix"); fi
 
   ram_gb=$(( $(sysctl -n hw.memsize 2>/dev/null || print 0) / 1073741824 ))
   if (( ram_gb > 0 )); then labels+=("ram-${ram_gb}gb"); fi
 
-  print -r -- "${(j:,:)labels}"
+  print -r -- "RUNNER_LABELS=self-hosted,macOS,$arch"
+  print -r -- "BURST_LABELS=${(j:,:)labels}"
 }
 
 # Answered before the configuration is read: this is what you consult while

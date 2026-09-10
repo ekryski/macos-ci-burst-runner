@@ -77,23 +77,28 @@ is leased it runs with the permissions of the macOS account, as the
 
 ## Capability labels
 
-You declare what a Mac *is* — architecture, chip, model, OS, memory — as
-`BURST_LABELS`. Ask the machine rather than typing it from memory:
+A Mac carries two label sets. `RUNNER_LABELS` is what never changes about it —
+`self-hosted`, `macOS`, architecture — and stays on the runner while it is Off.
+`BURST_LABELS` is what workflows select on — chip, model, OS, memory — and is
+present only while the Mac is Available. Ask the machine rather than typing
+either from memory:
 
 ```bash
 mac-ci-burst capabilities
-# ARM64,M2,macbook_air,macos-26,ram-8gb
+# RUNNER_LABELS=self-hosted,macOS,ARM64
+# BURST_LABELS=M2,macbook_air,macos-26,ram-8gb
 ```
 
 That reports architecture (`ARM64`/`X64`), Apple silicon generation (`M2`,
-`M4-Pro`, …), model (`macbook_air`, `macbook_pro`, `mini`, `studio`, …), major OS
-(`macos-26`), and memory (`ram-8gb`). It only prints a suggestion; you decide
-what the machine should actually advertise:
+`M4-Pro`, …), model (`macbook_air`, `macbook_pro`, `mini`, `studio`, …), major OS,
+and memory (`ram-8gb`). The OS label uses GitHub's hosted image names — `macos-26`
+on Apple silicon, `macos-26-intel` on Intel — so a workflow can name one runner
+class whether the job lands on this Mac or on a GitHub-hosted runner. It only
+prints a suggestion; paste both lines into `config.env` and trim what the machine
+should not advertise.
 
-```sh
-BURST_LABELS=M2,macbook_air,macos-26,ram-8gb
-RUNNER_LABELS=self-hosted,macOS,ARM64
-```
+Listing the `BURST_LABELS` inside `RUNNER_LABELS` as well, the older layout,
+still works: the always-present set is whatever `RUNNER_LABELS` holds beyond them.
 
 Structured labels let a workflow say what it needs rather than which box it wants
 — `macos-26` for an OS bump, `M2` for a chipset check, `ram-8gb` to keep a
@@ -107,21 +112,21 @@ its requirements:
 ```yaml
 jobs:
   build:
-    runs-on: [self-hosted, macOS, ARM64, M2, macos-26]
+    runs-on: [self-hosted, macOS, ARM64, macos-26]
 ```
 
 GitHub does not negotiate capabilities dynamically — label matching *is* the
 mechanism. What makes this safe is that the labels a job selects on are exactly
 the labels the controller withdraws when you stop lending the machine.
 
-The corollary is the one rule you must check yourself: whatever `RUNNER_LABELS`
-still holds once `BURST_LABELS` is stripped (normally just `self-hosted` and
-`macOS`) is what the Mac keeps matching while Off. No workflow may be satisfiable
-by that remainder alone. `setup-runner.sh` prints both sets at registration so
-you can confirm it.
+The corollary is the one rule you must check yourself: the always-present set
+(normally `self-hosted`, `macOS`, and the architecture) is what the Mac keeps
+matching while Off. No workflow may be satisfiable by it alone — every eligible
+job needs at least one `BURST_LABELS` entry, such as `macos-26`.
+`setup-runner.sh` prints both sets at registration so you can confirm it.
 
 Drain and Off do not remove only the configured capabilities — they reduce the
-runner to exactly that static remainder. Renaming a capability, or adding a label
+runner to exactly that always-present set. Renaming a capability, or adding a label
 by hand in the GitHub UI, would otherwise leave a label nothing manages, and an
 unmanaged label keeps the Mac matchable no matter how often you drain. Anything
 advertised that is in neither set is reported as `unmanagedLabels` in

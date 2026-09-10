@@ -33,9 +33,9 @@ Safety constraints:
    name, scheduling label, runner directory, or disk floor. Ask me for missing
    values as one concise group.
 7. Every eligible workflow must require at least one label from `BURST_LABELS`,
-   and none may be satisfiable by the labels that remain when `BURST_LABELS` is
-   stripped from `RUNNER_LABELS`. Do not treat that always-present remainder —
-   normally `self-hosted` and `macOS` — as the availability switch.
+   and none may be satisfiable by the always-present `RUNNER_LABELS` alone. Do
+   not treat that set — normally `self-hosted`, `macOS`, and the architecture —
+   as the availability switch.
 8. Do not alter repository workflows without showing me the exact proposed diff
    and receiving approval.
 9. Stop without registering anything if the existing runner directory conflicts,

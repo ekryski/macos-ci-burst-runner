@@ -41,14 +41,10 @@ static_label_list=()
 for label in ${(s:,:)RUNNER_LABELS}; do
   [[ ",$BURST_LABELS," == *",$label,"* ]] || static_label_list+=("$label")
 done
-for label in "${burst_label_list[@]}"; do
-  [[ ",$RUNNER_LABELS," == *",$label,"* ]] || {
-    print -u2 "RUNNER_LABELS must include every BURST_LABELS entry (missing: $label)"; exit 78;
-  }
-done
 # Whatever is left when the capability labels are stripped is what this Mac still
 # matches on while it is Off. If a workflow can be satisfied by that remainder
 # alone, draining cannot make the machine unschedulable.
+(( ${#static_label_list} )) || { print -u2 "RUNNER_LABELS must name at least the labels kept while Off"; exit 78; }
 print "Labels always present (Off included): ${(j:, :)static_label_list}"
 print "Capability labels added only while Available: ${(j:, :)burst_label_list}"
 print "Confirm no workflow selects on the always-present set alone."

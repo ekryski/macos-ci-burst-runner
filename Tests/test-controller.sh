@@ -246,12 +246,49 @@ wait $holder
 [[ ! -f "$MOCK_SERVICE" ]] || { print -u2 "off did not run once the lock was free"; exit 1 }
 print off > "$app_support/desired-state"
 
+# The disjoint layout: RUNNER_LABELS names only what stays while Off, and
+# BURST_LABELS is listed nowhere else. Off, convergence, and stray detection
+# must behave exactly as they do with the older superset layout.
+print -r -- '{"runners":[{"id":42,"name":"Test-Mac","os":"macOS","status":"online","busy":false,"labels":[{"name":"self-hosted"},{"name":"macOS"},{"name":"ARM64"},{"name":"m2"},{"name":"ram-8gb"},{"name":"air"}]}]}' > "$MOCK_STATE"
+cat > "$app_support/config.env" <<CONFIG
+GITHUB_SCOPE_TYPE=org
+GITHUB_OWNER=test-owner
+RUNNER_NAME=Test-Mac
+BURST_LABELS=m2,ram-8gb
+RUNNER_LABELS=self-hosted,macOS,ARM64
+RUNNER_DIR="$test_root/runner"
+MIN_FREE_GIB=100
+CONFIG
+print off > "$app_support/desired-state"
+[[ "$("$ctl" status | /usr/bin/jq -c '.unmanagedLabels')" == '["air"]' ]] || {
+  print -u2 "disjoint layout: stray not reported"; exit 1
+}
+"$ctl" off
+[[ "$("$ctl" status | /usr/bin/jq -c '.advertisedLabels')" == '["self-hosted","macOS","ARM64"]' ]] || {
+  print -u2 "disjoint layout: Off did not keep exactly RUNNER_LABELS: $("$ctl" status | /usr/bin/jq -c '.advertisedLabels')"; exit 1
+}
+print available > "$app_support/desired-state"
+MOCK_FREE_KIB=209715200 "$ctl" reconcile
+[[ "$("$ctl" status | /usr/bin/jq -c '.advertisedLabels')" == '["self-hosted","macOS","ARM64","m2","ram-8gb"]' ]] || {
+  print -u2 "disjoint layout: reconcile did not converge: $("$ctl" status | /usr/bin/jq -c '.advertisedLabels')"; exit 1
+}
+"$ctl" off
+print off > "$app_support/desired-state"
+
 # Detection describes the machine the tests run on: arch, OS, and memory are
 # always derivable; chip and model are Apple-silicon specific.
 detected="$("$ctl" capabilities)"
-[[ "$detected" == (ARM64|X64)* ]] || { print -u2 "detection arch wrong: $detected"; exit 1 }
-[[ "$detected" == *macos-<->* ]] || { print -u2 "detection OS wrong: $detected"; exit 1 }
-[[ "$detected" == *ram-<->gb* ]] || { print -u2 "detection RAM wrong: $detected"; exit 1 }
+static_line="$(print -r -- "$detected" | /usr/bin/sed -n 's/^RUNNER_LABELS=//p')"
+burst_line="$(print -r -- "$detected" | /usr/bin/sed -n 's/^BURST_LABELS=//p')"
+[[ "$static_line" == self-hosted,macOS,(ARM64|X64) ]] || { print -u2 "static labels wrong: $static_line"; exit 1 }
+[[ ",$burst_line," != *,(ARM64|X64),* ]] || { print -u2 "architecture leaked into BURST_LABELS: $burst_line"; exit 1 }
+# Hosted image naming: macos-NN on Apple silicon, macos-NN-intel on Intel.
+if [[ "$static_line" == *ARM64 ]]; then
+  [[ ",$burst_line," == *,macos-<->,* ]] || { print -u2 "OS label not hosted-aligned: $burst_line"; exit 1 }
+else
+  [[ ",$burst_line," == *,macos-<->-intel,* ]] || { print -u2 "OS label not hosted-aligned: $burst_line"; exit 1 }
+fi
+[[ "$burst_line" == *ram-<->gb* ]] || { print -u2 "detection RAM wrong: $burst_line"; exit 1 }
 
 print 'capability label set and detection tests passed'
 
