@@ -93,7 +93,6 @@ function input(env, name, fallback = '') {
 export async function main(env = process.env) {
   const classes = parseClasses(input(env, 'classes'));
   const token = input(env, 'token');
-  if (!token) throw new Error('token input is empty');
   const owner = input(env, 'owner');
   const minIdle = Number.parseInt(input(env, 'min-idle', '1'), 10);
   if (!Number.isInteger(minIdle) || minIdle < 1) throw new Error('min-idle must be a positive integer');
@@ -104,6 +103,10 @@ export async function main(env = process.env) {
 
   let result;
   try {
+    // Dependabot and fork pull requests do not receive organization secrets, so
+    // the token step yields nothing. That is an unreadable API, not bad input:
+    // it must follow on-error rather than block every such pull request.
+    if (!token) throw new Error('no token (secrets unavailable to this run?)');
     const runners = await listRunners({
       api: env.GITHUB_API_URL || 'https://api.github.com', owner, token, group: input(env, 'runner-group'),
     });

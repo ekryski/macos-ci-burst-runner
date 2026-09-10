@@ -301,11 +301,14 @@ jobs:
       targets: ${{ steps.route.outputs.targets }}
     steps:
       - id: token
+        # Dependabot and fork PRs get no secrets; the router then follows on-error.
+        continue-on-error: true
         uses: actions/create-github-app-token@<sha>
         with:
-          app-id: ${{ vars.RUNNER_ROUTER_APP_ID }}
+          client-id: ${{ vars.RUNNER_ROUTER_CLIENT_ID }}
           private-key: ${{ secrets.RUNNER_ROUTER_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          permission-organization-self-hosted-runners: read
       - id: route
         uses: TheTom/macos-ci-burst-runner/route@<sha>
         with:
@@ -339,9 +342,14 @@ is Off or draining has withdrawn its capabilities, so it never counts as idle.
 The workflow `GITHUB_TOKEN` cannot read organization runners. Create a GitHub App
 owned by the organization, with no webhook and a single permission —
 Organization → **Self-hosted runners: Read-only** — and install it on the
-organization. Store its ID as the organization variable `RUNNER_ROUTER_APP_ID`
-and its private key as the organization secret `RUNNER_ROUTER_PRIVATE_KEY`,
-scoped to the repositories that route.
+organization. Store its client ID as the organization variable
+`RUNNER_ROUTER_CLIENT_ID` and its private key as the organization secret
+`RUNNER_ROUTER_PRIVATE_KEY`, scoped to the repositories that route. The token
+step narrows the minted token to that one permission.
+
+Runs that receive no secrets — Dependabot and fork pull requests — get no token.
+The router treats that like an unreadable API and follows `on-error`, so by
+default those runs behave exactly as they did before routing existed.
 
 Know the limits before relying on it:
 

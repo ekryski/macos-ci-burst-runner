@@ -163,8 +163,15 @@ test('an unreadable API follows on-error, defaulting to self-hosted', async () =
   } finally { api.close(); }
 });
 
+test('a missing token follows on-error instead of blocking the run', async () => {
+  // Dependabot and fork pull requests get no organization secrets.
+  const e = env('http://127.0.0.1:9', { INPUT_TOKEN: '' });
+  await main(e.vars);
+  assert.ok(Array.isArray(e.output().targets.macos));
+  await assert.rejects(main(env('http://127.0.0.1:9', { INPUT_TOKEN: '', 'INPUT_ON-ERROR': 'fail' }).vars), /no token/);
+});
+
 test('rejects bad inputs before calling the API', async () => {
-  await assert.rejects(main(env('http://127.0.0.1:9', { INPUT_TOKEN: '' }).vars), /token input is empty/);
   await assert.rejects(main(env('http://127.0.0.1:9', { 'INPUT_MIN-IDLE': '0' }).vars), /min-idle/);
   await assert.rejects(main(env('http://127.0.0.1:9', { INPUT_FORCE: 'maybe' }).vars), /invalid force/);
 });
