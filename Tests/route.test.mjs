@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseClasses, decide, main } from '../route/route.mjs';
 
 const runner = (name, labels, { status = 'online', busy = false } = {}) =>
@@ -174,4 +175,14 @@ test('a missing token follows on-error instead of blocking the run', async () =>
 test('rejects bad inputs before calling the API', async () => {
   await assert.rejects(main(env('http://127.0.0.1:9', { 'INPUT_MIN-IDLE': '0' }).vars), /min-idle/);
   await assert.rejects(main(env('http://127.0.0.1:9', { INPUT_FORCE: 'maybe' }).vars), /invalid force/);
+});
+
+test('action.yml uses expressions only where the runner allows them', () => {
+  // The runner evaluates ${{ }} anywhere in action.yml, descriptions included,
+  // and only the github context exists there. An example expression in a
+  // description once stopped the action from loading at all.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const lines = readFileSync(join(here, '..', 'route', 'action.yml'), 'utf8').split('\n');
+  const offenders = lines.filter((l) => l.includes('${{') && !/^\s*default:\s*\$\{\{\s*github\.[a-z_]+\s*\}\}\s*$/.test(l));
+  assert.deepEqual(offenders, []);
 });

@@ -39,7 +39,8 @@ outputs:
   targets:
     description: >-
       JSON object mapping each class to its runs-on value, an array of labels
-      or a hosted label: runs-on: ${{ fromJSON(needs.route.outputs.targets).macos }}
+      or a hosted label. Read one class with fromJSON on the job output, e.g.
+      fromJSON(needs.route.outputs.targets).macos (see the README).
   decisions:
     description: JSON object with the target, idle count, and online count per class.
 runs:
