@@ -295,6 +295,11 @@ The installed command lives in
 `~/.local/bin` or `~/bin` when one of those is on your `PATH`, and otherwise
 prints the `export PATH` line to add.
 
+Commands that change state hold a lock for their whole run, so the menu's
+15-second tick cannot interleave with a command you run by hand. A command that
+cannot get the lock within `MAC_CI_BURST_LOCK_TIMEOUT` seconds (default 120)
+exits 75 without acting.
+
 ### The job-started hook and paths with spaces
 
 The runner passes `ACTIONS_RUNNER_HOOK_JOB_STARTED` to bash unquoted, so a hook

@@ -223,6 +223,27 @@ MOCK_FREE_KIB=209715200 "$ctl" reconcile
 [[ "$("$ctl" status | /usr/bin/jq -c '.unmanagedLabels')" == '[]' ]] || {
   print -u2 "stray survived reconcile: $("$ctl" status | /usr/bin/jq -c '.unmanagedLabels')"; exit 1
 }
+
+# Desired Available implies a running listener: a service stopped behind the
+# controller's back is restarted by reconcile rather than left dead.
+/bin/rm -f "$MOCK_SERVICE"
+MOCK_FREE_KIB=209715200 "$ctl" reconcile
+[[ -f "$MOCK_SERVICE" ]] || { print -u2 "reconcile did not restart a stopped service"; exit 1 }
+
+# Mutating commands are serialized. While another process holds the lock, a
+# command waits and then gives up with 75 instead of interleaving with it.
+/bin/zsh -c 'zmodload zsh/system; zsystem flock "$1"; sleep 3' _ "$app_support/.lock" &
+holder=$!
+sleep 0.5
+set +e
+MAC_CI_BURST_LOCK_TIMEOUT=1 "$ctl" off >/dev/null 2>&1
+locked_rc=$?
+set -e
+[[ "$locked_rc" == 75 ]] || { print -u2 "command ran while the lock was held (rc=$locked_rc)"; exit 1 }
+[[ -f "$MOCK_SERVICE" ]] || { print -u2 "locked-out command still stopped the service"; exit 1 }
+wait $holder
+"$ctl" off
+[[ ! -f "$MOCK_SERVICE" ]] || { print -u2 "off did not run once the lock was free"; exit 1 }
 print off > "$app_support/desired-state"
 
 # Detection describes the machine the tests run on: arch, OS, and memory are

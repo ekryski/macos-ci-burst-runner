@@ -441,6 +441,10 @@ reconcile() {
         # Above the floor the advertised set should match the configuration, so
         # a config edit converges on its own instead of waiting for `available`.
         [[ -n "$id" ]] && converge_labels "$id" "$json"
+        # Desired Available means a running listener. Without this, a service
+        # stopped behind the controller's back — a crash, a racing command —
+        # leaves the Mac advertising labels with nothing to take the jobs.
+        if [[ -n "$id" && -x "$RUNNER_DIR/svc.sh" ]]; then start_awake; start_service; fi
         if [[ "$busy" != true ]] && (( free < SOFT_FREE_GIB )) && sweep_due; then
           # Idle and heading toward the floor: reclaim now so a future job is not
           # denied at admission time. Never denies, never touches eligibility.
@@ -489,7 +493,31 @@ install_hook() {
 
 usage() { print -u2 "usage: mac-ci-burst {status|tick|available|drain|off|reconcile|capabilities|install-hook}"; exit 64; }
 
+# The menu's 15-second tick and a command from the CLI are separate processes,
+# and each reads the desired state before acting on it after several slow GitHub
+# calls. Unserialized, a tick that read "off" can stop the service `available`
+# has just started. Mutating commands therefore hold one lock for their whole run.
+acquire_lock() {
+  local lock="$APP_SUPPORT/.lock" rc=0
+  zmodload zsh/system
+  # flock opens the file but will not create it.
+  : >> "$lock"
+  zsystem flock -t "${MAC_CI_BURST_LOCK_TIMEOUT:-120}" "$lock" || rc=$?
+  (( rc == 0 )) && return
+  # Status 2 is the timeout; anything else is a failure to take the lock at all,
+  # which must not be reported as contention.
+  if (( rc == 2 )); then
+    print -u2 "Another mac-ci-burst command is still running; try again shortly"
+    exit 75
+  fi
+  print -u2 "Could not lock $lock"
+  exit 74
+}
+
 require_tools
+case "${1:-}" in
+  tick|available|drain|off|reconcile|install-hook) acquire_lock ;;
+esac
 case "${1:-}" in
   status) status_json ;;
   tick) reconcile; status_json ;;
