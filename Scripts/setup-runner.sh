@@ -69,6 +69,10 @@ free_gib="$(df -Pk "$DISK_VOLUME" | awk 'NR == 2 { printf "%d", $4 / 1024 / 1024
   print -u2 "Runner setup blocked: ${free_gib} GiB free; ${SETUP_MIN_FREE_GIB} GiB required"; exit 75;
 }
 [[ ! -e "$RUNNER_DIR" ]] || { print -u2 "Runner directory already exists: $RUNNER_DIR"; exit 73; }
+# The runner passes its job hook path to bash unquoted; see install_hook.
+[[ "$RUNNER_DIR" != *[[:space:]]* ]] || {
+  print -u2 "RUNNER_DIR must not contain whitespace: $RUNNER_DIR"; exit 78;
+}
 
 case "$(uname -m)" in
   arm64) runner_asset_pattern='^actions-runner-osx-arm64-.*\.tar\.gz$' ;;
@@ -108,7 +112,6 @@ config_args=(
 # The job-started hook reads its policy from the runner .env, so the same
 # thresholds and command templates apply whether a job or the controller runs it.
 {
-  print -r -- "ACTIONS_RUNNER_HOOK_JOB_STARTED=$APP_SUPPORT/bin/pre-job-disk-guard.sh"
   print -r -- "MAC_CI_BURST_MIN_FREE_GIB=$MIN_FREE_GIB"
   print -r -- "MAC_CI_BURST_SOFT_FREE_GIB=$SOFT_FREE_GIB"
   print -r -- "MAC_CI_BURST_DISK_VOLUME=$DISK_VOLUME"
@@ -120,6 +123,7 @@ config_args=(
   print -r -- "MAC_CI_BURST_CLEAN_CMD=$CLEAN_CMD"
   print -r -- "MAC_CI_BURST_CLEAN_RM=$CLEAN_RM"
 } > "$RUNNER_DIR/.env"
+"$APP_SUPPORT/bin/mac-ci-burst" install-hook
 (cd "$RUNNER_DIR" && ./svc.sh install)
 
 "$APP_SUPPORT/bin/mac-ci-burst" off

@@ -407,9 +407,11 @@ print 'disk guard tier tests passed'
 
 export GUARD_SHIM_LOG="$test_root/guard-shim.log"
 mkdir -p "$app_support/bin"
+# Bash, like the real guard: the runner invokes the job hook with /bin/bash
+# regardless of its shebang.
 cat > "$app_support/bin/pre-job-disk-guard.sh" <<'MOCK_GUARD'
-#!/bin/zsh
-print -r -- "$MAC_CI_BURST_GUARD_MODE $MAC_CI_BURST_MIN_FREE_GIB $MAC_CI_BURST_SOFT_FREE_GIB $MAC_CI_BURST_CACHE_DIRS $RUNNER_WORK $CARGO_HOME" >> "$GUARD_SHIM_LOG"
+#!/bin/bash
+printf '%s\n' "$MAC_CI_BURST_GUARD_MODE $MAC_CI_BURST_MIN_FREE_GIB $MAC_CI_BURST_SOFT_FREE_GIB $MAC_CI_BURST_CACHE_DIRS $RUNNER_WORK $CARGO_HOME" >> "$GUARD_SHIM_LOG"
 MOCK_GUARD
 chmod +x "$app_support/bin/pre-job-disk-guard.sh"
 
@@ -462,3 +464,48 @@ set -e
 }
 
 print 'idle sweep and admission-retry tests passed'
+
+# ---------------------------------------------------------------------------
+# Job-started hook path
+# ---------------------------------------------------------------------------
+
+# The runner hands ACTIONS_RUNNER_HOOK_JOB_STARTED to bash unquoted. This
+# harness's app support path contains "Application Support", like every default
+# install, so invoking the guard there the way the runner does must fail —
+# otherwise this test is not reproducing the bug it guards against.
+runner_invoke() { /bin/bash --noprofile --norc -e -o pipefail ${=1}; }
+old_hook="$app_support/bin/pre-job-disk-guard.sh"
+[[ "$old_hook" == *" "* ]] || { print -u2 "harness path has no space; test would prove nothing"; exit 1 }
+! runner_invoke "$old_hook" >/dev/null 2>&1 || { print -u2 "unquoted spaced path unexpectedly ran"; exit 1 }
+
+print -r -- "ACTIONS_RUNNER_HOOK_JOB_STARTED=$old_hook" >> "$test_root/runner/.env"
+print off > "$app_support/desired-state"
+/bin/rm -f "$MOCK_SERVICE"
+"$ctl" install-hook
+
+hook_lines="$(/usr/bin/grep -c '^ACTIONS_RUNNER_HOOK_JOB_STARTED=' "$test_root/runner/.env")"
+[[ "$hook_lines" == 1 ]] || { print -u2 "expected one hook line, found $hook_lines"; exit 1 }
+/usr/bin/grep -q '^CARGO_HOME=' "$test_root/runner/.env" || { print -u2 "install-hook dropped other .env lines"; exit 1 }
+new_hook="$(/usr/bin/sed -n 's/^ACTIONS_RUNNER_HOOK_JOB_STARTED=//p' "$test_root/runner/.env")"
+[[ "$new_hook" == "$test_root/runner/mac-ci-burst-job-started.sh" ]] || { print -u2 "hook path wrong: $new_hook"; exit 1 }
+
+/bin/rm -f "$GUARD_SHIM_LOG"
+runner_invoke "$new_hook" || { print -u2 "runner could not execute the linked hook"; exit 1 }
+[[ -s "$GUARD_SHIM_LOG" ]] || { print -u2 "linked hook did not reach the guard"; exit 1 }
+
+# Re-running is idempotent.
+"$ctl" install-hook
+[[ "$(/usr/bin/grep -c '^ACTIONS_RUNNER_HOOK_JOB_STARTED=' "$test_root/runner/.env")" == 1 ]]
+
+# A runner directory the hook path cannot survive is refused, not half-installed.
+spaced_runner="$test_root/runner with space"
+mkdir -p "$spaced_runner"
+/usr/bin/sed -i '' "s|^RUNNER_DIR=.*|RUNNER_DIR=\"$spaced_runner\"|" "$app_support/config.env"
+set +e
+"$ctl" install-hook >/dev/null 2>&1
+spaced_rc=$?
+set -e
+[[ "$spaced_rc" == 78 ]] || { print -u2 "whitespace RUNNER_DIR not refused (rc=$spaced_rc)"; exit 1 }
+[[ ! -e "$spaced_runner/mac-ci-burst-job-started.sh" ]]
+
+print 'job-started hook path tests passed'

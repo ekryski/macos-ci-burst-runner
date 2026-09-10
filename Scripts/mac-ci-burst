@@ -459,7 +459,35 @@ reconcile() {
   esac
 }
 
-usage() { print -u2 "usage: mac-ci-burst {status|tick|available|drain|off|reconcile|capabilities}"; exit 64; }
+# The runner hands ACTIONS_RUNNER_HOOK_JOB_STARTED to bash without quoting it, so
+# a hook path containing a space is split and the job fails in "Set up runner"
+# before its first step. Every default install has one: "Application Support".
+# The hook is therefore reached through a link inside the runner directory,
+# whose path this project controls and checks.
+HOOK_LINK="$RUNNER_DIR/mac-ci-burst-job-started.sh"
+
+install_hook() {
+  local env_file="$RUNNER_DIR/.env" temporary
+  [[ -d "$RUNNER_DIR" ]] || { print -u2 "Runner directory does not exist: $RUNNER_DIR"; exit 78; }
+  [[ "$RUNNER_DIR" != *[[:space:]]* ]] || {
+    print -u2 "RUNNER_DIR contains whitespace, which the runner cannot pass to its job hook: $RUNNER_DIR"
+    exit 78
+  }
+  [[ -x "$DISK_GUARD" ]] || { print -u2 "Disk guard is not installed: $DISK_GUARD"; exit 78; }
+  ln -sfn "$DISK_GUARD" "$HOOK_LINK"
+  temporary="$env_file.tmp.$$"
+  {
+    [[ -f "$env_file" ]] && grep -v '^ACTIONS_RUNNER_HOOK_JOB_STARTED=' "$env_file" || true
+    print -r -- "ACTIONS_RUNNER_HOOK_JOB_STARTED=$HOOK_LINK"
+  } > "$temporary"
+  mv "$temporary" "$env_file"
+  # The listener reads .env only at start, so a running service keeps the old path.
+  if service_loaded; then
+    print -u2 "Runner service is running with the previous hook; apply with: mac-ci-burst off && mac-ci-burst available"
+  fi
+}
+
+usage() { print -u2 "usage: mac-ci-burst {status|tick|available|drain|off|reconcile|capabilities|install-hook}"; exit 64; }
 
 require_tools
 case "${1:-}" in
@@ -469,5 +497,6 @@ case "${1:-}" in
   drain) begin_drain ;;
   off) turn_off ;;
   reconcile) reconcile ;;
+  install-hook) install_hook ;;
   *) usage ;;
 esac

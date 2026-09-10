@@ -79,6 +79,16 @@ else
   print "Linked mac-ci-burst into $link_dir"
 fi
 
+# Runners registered before the hook moved into the runner directory still point
+# at a path the runner splits on its space. Repair them in place.
+if [[ -f "$config_file" ]]; then
+  runner_dir="$(source "$config_file" >/dev/null 2>&1; print -r -- "${RUNNER_DIR:-}")"
+  hook_line="$( [[ -n "$runner_dir" && -f "$runner_dir/.env" ]] && grep '^ACTIONS_RUNNER_HOOK_JOB_STARTED=' "$runner_dir/.env" || true)"
+  if [[ "${hook_line#*=}" == *[[:space:]]* ]]; then
+    "$bin_dir/mac-ci-burst" install-hook && print "Repaired the job-started hook in $runner_dir"
+  fi
+fi
+
 print "Controller installed. Review config.env, then run:"
 print "  $bin_dir/setup-runner.sh"
 print "Registration leaves the runner Off and unschedulable."

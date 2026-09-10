@@ -286,6 +286,7 @@ mac-ci-burst available    # pass disk gate, add eligibility, start runner
 mac-ci-burst drain        # remove eligibility, finish current job, stop
 mac-ci-burst off          # stop now; refuses while GitHub says busy
 mac-ci-burst reconcile    # enforce desired state, disk floor, and idle sweeps
+mac-ci-burst install-hook # (re)link the job-started disk guard into the runner
 ```
 
 The installed command lives in
@@ -293,6 +294,23 @@ The installed command lives in
 `MAC_CI_BURST_HOME` is overridden. `install-controller.sh` links it into
 `~/.local/bin` or `~/bin` when one of those is on your `PATH`, and otherwise
 prints the `export PATH` line to add.
+
+### The job-started hook and paths with spaces
+
+The runner passes `ACTIONS_RUNNER_HOOK_JOB_STARTED` to bash unquoted, so a hook
+path containing a space is split and every job fails in "Set up runner" before
+its first step. The default install directory, `Application Support`, has one.
+The hook is therefore registered as `mac-ci-burst-job-started.sh` inside the
+runner directory, linked to the installed guard, and `RUNNER_DIR` itself must not
+contain whitespace — `setup-runner.sh` refuses one that does.
+
+Runners registered before this layout still point at the old path. Re-running
+`install-controller.sh` repairs them in place; the running listener only reads
+the change when it restarts:
+
+```bash
+mac-ci-burst off && mac-ci-burst available
+```
 
 ## Safety model
 
