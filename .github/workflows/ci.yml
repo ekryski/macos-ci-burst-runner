@@ -22,3 +22,5 @@ jobs:
         run: swift build -c release
       - name: Test state transitions, disk guard tiers, and idle sweeps
         run: ./Tests/test-controller.sh
+      - name: Test the runner router
+        run: node --test Tests/route.test.mjs

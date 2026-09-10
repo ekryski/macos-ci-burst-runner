@@ -282,6 +282,79 @@ and fine-grained alternatives in its
 Closing a MacBook lid normally suspends it even when `caffeinate` is active. Keep
 the lid open, or use a supported powered clamshell configuration.
 
+## Hybrid routing: self-hosted first, GitHub-hosted on overflow
+
+GitHub has no native fallback from self-hosted to hosted runners. A job waits
+for an idle matching self-hosted runner, and fails after 24 hours in the queue.
+Giving a self-hosted runner a hosted label such as `macos-latest` once acted as
+an undocumented fallback; it no longer does.
+
+The `route` action fills that gap. It runs as a first job, reads runner state
+through the API, and hands each later job a `runs-on`: the self-hosted labels
+while an idle runner matches, otherwise that class's hosted fallback.
+
+```yaml
+jobs:
+  route:
+    runs-on: ubuntu-slim
+    outputs:
+      targets: ${{ steps.route.outputs.targets }}
+    steps:
+      - id: token
+        uses: actions/create-github-app-token@<sha>
+        with:
+          app-id: ${{ vars.RUNNER_ROUTER_APP_ID }}
+          private-key: ${{ secrets.RUNNER_ROUTER_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+      - id: route
+        uses: TheTom/macos-ci-burst-runner/route@<sha>
+        with:
+          token: ${{ steps.token.outputs.token }}
+          runner-group: Home CI
+          classes: |
+            linux: self-hosted,Linux,ARM64,waffuru-linux -> ubuntu-24.04-arm
+            macos: self-hosted,macOS,ARM64,waffuru-mac -> macos-26
+            bench: self-hosted,macOS,ARM64,waffuru-metal -> none
+
+  lint:
+    needs: route
+    runs-on: ${{ fromJSON(needs.route.outputs.targets).macos }}
+```
+
+Each class is `name: labels -> hosted-label`; `-> none` keeps a class on
+self-hosted runners always. Name hosted fallbacks after GitHub's images —
+`macos-26`, `macos-26-intel`, `ubuntu-24.04-arm` — which is also why
+`mac-ci-burst capabilities` uses those names for the OS label. A burst Mac that
+is Off or draining has withdrawn its capabilities, so it never counts as idle.
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `token` | required | Can list the organization's self-hosted runners. |
+| `classes` | required | One class per line, as above. |
+| `runner-group` | empty | Count only runners in this group. Set it: a runner in a group the repository cannot use would look idle and strand the job. |
+| `min-idle` | `1` | Idle matching runners required to stay self-hosted. |
+| `force` | empty | `self-hosted` or `hosted` for every class with a fallback. |
+| `on-error` | `self-hosted` | If the API cannot be read: `self-hosted` (today's behaviour, never spends hosted minutes silently), `hosted`, or `fail`. |
+
+The workflow `GITHUB_TOKEN` cannot read organization runners. Create a GitHub App
+owned by the organization, with no webhook and a single permission —
+Organization → **Self-hosted runners: Read-only** — and install it on the
+organization. Store its ID as the organization variable `RUNNER_ROUTER_APP_ID`
+and its private key as the organization secret `RUNNER_ROUTER_PRIVATE_KEY`,
+scoped to the repositories that route.
+
+Know the limits before relying on it:
+
+- It is a snapshot. Two runs routed in the same moment can both see one idle
+  runner; one then waits for it.
+- Hosted macOS runs in a virtual machine. Metal is paravirtualized — fine for
+  smoke tests, not for benchmarks — and GitHub documents Metal Performance
+  Shaders as unsupported there. Keep GPU benchmarks on `-> none`.
+- Hosted macOS minutes on private repositories bill at a much higher rate than
+  Linux, so every overflow has a cost.
+- A job that falls back must actually work on the hosted image. Try each class
+  once with `force: hosted` before trusting it.
+
 ## Command-line control
 
 ```bash
@@ -341,7 +414,12 @@ swift build -c release
 ```
 
 The controller test uses mock GitHub, service, sleep, and disk commands. It never
-registers a real runner or changes GitHub state.
+registers a real runner or changes GitHub state. The router test runs against a
+local mock API:
+
+```bash
+node --test Tests/route.test.mjs
+```
 
 ## AI-assisted setup
 

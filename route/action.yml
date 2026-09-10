@@ -1,0 +1,47 @@
+name: Mac CI Burst route
+description: >-
+  Chooses runs-on for each runner class: self-hosted labels while an idle
+  self-hosted runner matches, otherwise the class's GitHub-hosted fallback.
+inputs:
+  token:
+    description: >-
+      Token that can list the owner's self-hosted runners (organization
+      permission "Self-hosted runners: read"). The workflow GITHUB_TOKEN cannot.
+    required: true
+  classes:
+    description: >-
+      One class per line, "name: label,label -> hosted-label". A fallback of
+      "none", or no arrow at all, keeps the class on self-hosted runners always.
+    required: true
+  owner:
+    description: Organization that owns the runners.
+    default: ${{ github.repository_owner }}
+  runner-group:
+    description: >-
+      Count only runners in this runner group. Recommended: a runner in a group
+      this repository cannot use would otherwise look idle and strand the job.
+    default: ''
+  min-idle:
+    description: Idle matching runners required before a class stays self-hosted.
+    default: '1'
+  force:
+    description: >-
+      "self-hosted" or "hosted" to override the decision for every class that
+      has a fallback. Useful behind a workflow_dispatch input.
+    default: ''
+  on-error:
+    description: >-
+      What to do when the runner API cannot be read. "self-hosted" (default)
+      keeps today's behaviour and never spends hosted minutes silently;
+      "hosted" sends classes with a fallback to GitHub-hosted; "fail" stops.
+    default: self-hosted
+outputs:
+  targets:
+    description: >-
+      JSON object mapping each class to its runs-on value, an array of labels
+      or a hosted label: runs-on: ${{ fromJSON(needs.route.outputs.targets).macos }}
+  decisions:
+    description: JSON object with the target, idle count, and online count per class.
+runs:
+  using: node24
+  main: route.mjs
