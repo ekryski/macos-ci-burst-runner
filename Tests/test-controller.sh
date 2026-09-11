@@ -477,6 +477,7 @@ mkdir -p "$app_support/bin"
 cat > "$app_support/bin/pre-job-disk-guard.sh" <<'MOCK_GUARD'
 #!/bin/bash
 printf '%s\n' "$MAC_CI_BURST_GUARD_MODE $MAC_CI_BURST_MIN_FREE_GIB $MAC_CI_BURST_SOFT_FREE_GIB $MAC_CI_BURST_CACHE_DIRS $RUNNER_WORK $CARGO_HOME" >> "$GUARD_SHIM_LOG"
+printf '%s\n' "$PATH" >> "$GUARD_SHIM_LOG.path"
 MOCK_GUARD
 chmod +x "$app_support/bin/pre-job-disk-guard.sh"
 
@@ -486,6 +487,8 @@ SWEEP_INTERVAL_SECONDS=3600
 CACHE_DIRS="_temp/*"
 CONFIG
 print -r -- "CARGO_HOME=$test_root/runner/_toolcache/cargo" > "$test_root/runner/.env"
+# The runner's captured PATH carries toolchains the controller's PATH lacks.
+print -r -- "$test_root/runner-only-toolchain/bin:/usr/bin" > "$test_root/runner/.path"
 print -r -- "GITHUB_TOKEN=not-forwarded" >> "$test_root/runner/.env"
 print available > "$app_support/desired-state"
 /bin/rm -f "$app_support/last-sweep"
@@ -496,6 +499,9 @@ MOCK_FREE_KIB=157286400 "$ctl" reconcile
 [[ -f "$app_support/last-sweep" ]]
 [[ "$(<"$GUARD_SHIM_LOG")" == "sweep 100 200 _temp/* $test_root/runner/_work $test_root/runner/_toolcache/cargo" ]] || {
   print -u2 "sweep invocation wrong:"; print -u2 -r -- "$(<"$GUARD_SHIM_LOG")"; exit 1
+}
+[[ "$(/usr/bin/head -n 1 "$GUARD_SHIM_LOG.path")" == "$test_root/runner-only-toolchain/bin:"* ]] || {
+  print -u2 "guard did not get the runner's PATH: $(/usr/bin/head -n 1 "$GUARD_SHIM_LOG.path")"; exit 1
 }
 MOCK_FREE_KIB=157286400 "$ctl" reconcile
 [[ "$(/usr/bin/wc -l < "$GUARD_SHIM_LOG" | /usr/bin/tr -d ' ')" == 1 ]] || {

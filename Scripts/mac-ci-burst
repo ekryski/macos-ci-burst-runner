@@ -290,6 +290,13 @@ run_disk_guard() {
     "RUNNER_WORK=$RUNNER_DIR/_work"
     "RUNNER_TOOL_CACHE=$RUNNER_DIR/_work/_tool"
   )
+  # Jobs see the PATH the runner captured in .path, which can include toolchains
+  # the controller's own PATH lacks — a keg-only Homebrew rustup, for instance.
+  # Without it the idle sweep and the admission retry could not find cargo, so
+  # they skipped reclamation that the job hook would have performed.
+  if [[ -s "$RUNNER_DIR/.path" ]]; then
+    env_pairs+=("PATH=$(tr -d '\n' < "$RUNNER_DIR/.path"):$PATH")
+  fi
   # The runner's own .env holds the toolchain locations the guard needs to find
   # cargo and cargo-sweep. Only those two keys are forwarded.
   if [[ -f "$RUNNER_DIR/.env" ]]; then
