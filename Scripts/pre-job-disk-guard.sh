@@ -277,7 +277,14 @@ resolve_clean_template() {
     return 0
   fi
   if [[ -n "$cargo_bin" ]]; then
-    clean_template="$(shell_quote "$cargo_bin") clean --target-dir {dir}"
+    # Like cargo-sweep, `cargo clean` refuses to run without a manifest, and the
+    # hook starts wherever the runner puts it: a Swift checkout, or / from the
+    # menu. Without one every clean failed and was ignored, so admission at the
+    # floor was denied with nothing reclaimed. The probe crate supplies it. Cargo
+    # also refuses a directory lacking CACHEDIR.TAG, so this default can only
+    # ever remove a genuine cargo target tree.
+    make_sweep_probe
+    clean_template="$(shell_quote "$cargo_bin") clean --manifest-path $(shell_quote "$sweep_probe/Cargo.toml") --target-dir {dir}"
     return 0
   fi
   if [[ "$clean_rm" == "1" ]]; then

@@ -147,8 +147,10 @@ re-measures free space between tiers and stops as soon as the space is back:
   configured this uses `cargo-sweep` when it is available, and is skipped
   otherwise.
 - **Tier 2 (free below `MIN_FREE_GIB`, admission only):** run `CLEAN_CMD` over
-  the same directories. The default is `cargo clean`; deleting a tree outright
-  requires an explicit `CLEAN_RM=1`.
+  the same directories. The default is `cargo clean`, which Cargo only allows on
+  a directory carrying its `CACHEDIR.TAG` marker — so point `CACHE_DIRS` at the
+  target directory itself (for `cargo llvm-cov`, its `llvm-cov-target`), not a
+  parent. Deleting a tree outright requires an explicit `CLEAN_RM=1`.
 
 Admission is denied with exit 75 only if free space is still under the floor
 after tier 2. The controller also runs tiers 0 and 1 as an idle housekeeping

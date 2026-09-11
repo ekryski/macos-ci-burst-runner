@@ -308,6 +308,12 @@ export CUSTOM_LOG="$test_root/custom-sweep.log"
 mkdir -p "$CARGO_HOME/bin"
 cat > "$CARGO_HOME/bin/cargo" <<'MOCK_CARGO'
 #!/bin/zsh
+# Like real cargo, `clean` needs a manifest. The hook's working directory has
+# none, so a clean without --manifest-path must fail rather than pass silently.
+if [[ "$1" == clean && "$*" != *--manifest-path* ]]; then
+  print -u2 "error: could not find \`Cargo.toml\` in \`$PWD\` or any parent directory"
+  exit 101
+fi
 print -r -- "$*" >> "$CARGO_LOG"
 MOCK_CARGO
 cat > "$CARGO_HOME/bin/cargo-sweep" <<'MOCK_SWEEP'
@@ -397,7 +403,8 @@ expected_clean="clean --target-dir $tool_root/build
 clean --target-dir $work_root/proj/.ci-cache/cache-b
 clean --target-dir $work_root/proj/.ci-cache/cache-a
 clean --target-dir $work_root/_temp/job-77-target"
-[[ "$(<"$CARGO_LOG")" == "$expected_clean" ]] || {
+# The manifest is a throwaway probe crate at a random path; compare without it.
+[[ "$(/usr/bin/sed 's/ --manifest-path [^ ]*sweep-probe[^ ]*Cargo.toml//' "$CARGO_LOG")" == "$expected_clean" ]] || {
   print -u2 "clean order wrong:"; print -u2 -r -- "$(<"$CARGO_LOG")"; exit 1
 }
 
